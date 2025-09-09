@@ -87,6 +87,7 @@ pub enum Check<'cmds> {
     IsOptionLike,
     IsOptionBinding(&'cmds str),
     IsNotOptionLike,
+    IsBatch(Vec<char>),
 }
 
 impl<'cmds, 'args> ValidateTransition<'args, State<'args>> for Check<'cmds> {
@@ -107,6 +108,10 @@ impl<'cmds, 'args> ValidateTransition<'args, State<'args>> for Check<'cmds> {
             Check::IsNotOptionLike => {
                 state.post_double_slash || !arg.starts_with("-")
             },
+
+            Check::IsBatch(batch) => {
+                !state.post_double_slash && arg.starts_with("-") && arg.len() > 2 && arg.chars().skip(1).all(|c| batch.contains(&c))
+            },
         }
     }
 }
@@ -117,7 +122,7 @@ pub enum Attachment {
     Positional,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reducer {
     EnableDoubleSlash,
     EnableHelp,
@@ -125,6 +130,7 @@ pub enum Reducer {
     StartValue(Attachment, usize),
     PushValue(Attachment),
     BindValue(usize, usize),
+    ResolveBatch(Vec<(char, usize)>),
 }
 
 impl<'args> DeriveState<'args, State<'args>> for Reducer {
@@ -142,14 +148,14 @@ impl<'args> DeriveState<'args, State<'args>> for Reducer {
                 state.keyword_count += 1;
             },
 
-            Reducer::StartValue(attachment, positional_id) => {
+            Reducer::StartValue(attachment, attachment_id) => {
                 match attachment {
                     Attachment::Option => {
-                        state.option_values.push((*positional_id, vec![]));
+                        state.option_values.push((*attachment_id, vec![]));
                     },
 
                     Attachment::Positional => {
-                        state.positional_values.push((*positional_id, vec![token]));
+                        state.positional_values.push((*attachment_id, vec![token]));
                     },
                 }
             },
@@ -172,6 +178,17 @@ impl<'args> DeriveState<'args, State<'args>> for Reducer {
 
             Reducer::BindValue(skip_len, option_id) => {
                 state.option_values.push((*option_id, vec![&token[*skip_len + 1..]]));
+            },
+
+            Reducer::ResolveBatch(batch) => {
+                for c in token.chars().skip(1) {
+                    let index = batch.iter()
+                        .find_map(|(other_c, option_id)| (c == *other_c).then_some(option_id));
+
+                    if let Some(option_id) = index {
+                        state.option_values.push((*option_id, vec![]));
+                    }
+                }
             },
         }
     }
@@ -327,10 +344,29 @@ pub struct OptionSpec {
 }
 
 impl OptionSpec {
-    pub fn boolean<TName: Into<String>>(name: TName) -> Self {
+    fn parse_names(name: &str) -> (String, Vec<String>) {
+        let names = name
+            .split(',')
+            .collect::<Vec<_>>();
+
+        let (primary_name, aliases) = names
+            .split_first()
+            .unwrap();
+
+        let aliases = aliases.iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        (primary_name.to_string(), aliases)
+    }
+
+    pub fn boolean(name: &str) -> Self {
+        let (primary_name, aliases)
+            = Self::parse_names(name);
+
         OptionSpec {
-            primary_name: name.into(),
-            aliases: vec![],
+            primary_name,
+            aliases,
             description: "".to_string(),
             
             min_len: 0,
@@ -339,14 +375,17 @@ impl OptionSpec {
             allow_binding: false,
             allow_boolean: true,
             is_hidden: false,
-            is_required: true,
+            is_required: false,
         }
     }
 
-    pub fn parametrized<TName: Into<String>>(name: TName) -> Self {
+    pub fn parametrized(name: &str) -> Self {
+        let (primary_name, aliases)
+            = Self::parse_names(name);
+
         OptionSpec {
-            primary_name: name.into(),
-            aliases: vec![],
+            primary_name,
+            aliases,
             description: "".to_string(),
             
             min_len: 1,
@@ -357,6 +396,11 @@ impl OptionSpec {
             is_hidden: false,
             is_required: true,
         }
+    }
+
+    pub fn all_names(&self) -> impl Iterator<Item = &str> {
+        once(self.primary_name.as_str())
+            .chain(self.aliases.iter().map(|alias| alias.as_str()))
     }
 }
 
@@ -389,6 +433,15 @@ impl std::fmt::Display for OptionSpec {
 pub enum Component {
     Positional(PositionalSpec),
     Option(OptionSpec),
+}
+
+impl Component {
+    pub fn is_option(&self) -> Option<&OptionSpec> {
+        match self {
+            Component::Option(spec) => Some(spec),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Component {
@@ -458,15 +511,36 @@ impl CommandSpec {
 pub struct CommandBuilderContext<'cmds> {
     machine: Machine<'cmds>,
     spec: &'cmds CommandSpec,
+    batch_check: Vec<char>,
+    batch_resolve: Vec<(char, usize)>,
     inhibit_options: usize,
     proxy_options: usize,
 }
 
 impl<'cmds> CommandBuilderContext<'cmds> {
     fn new(spec: &'cmds CommandSpec, command_id: usize) -> Self {
+        // -v,--verbose => vec!["v"]
+        let batch_check = spec.components.iter()
+            .filter_map(|component| component.is_option())
+            .flat_map(|option| option.all_names())
+            .filter(|name| name.starts_with("-") && !name.starts_with("--"))
+            .flat_map(|name| name.chars().skip(1))
+            .collect::<Vec<_>>();
+
+        // -v,--verbose => vec![("v", 0)]
+        let batch_resolve = spec.components.iter()
+            .enumerate()
+            .filter_map(|(component_id, component)| component.is_option().map(|option| (option, component_id)))
+            .flat_map(|(option, component_id)| option.all_names().map(move |name| (name, component_id)))
+            .filter(|(name, _)| name.starts_with("-") && !name.starts_with("--"))
+            .map(|(name, component_id)| (name.chars().skip(1).next().unwrap(), component_id))
+            .collect::<Vec<_>>();
+
         CommandBuilderContext {
             machine: Machine::new(command_id),
             spec,
+            batch_check,
+            batch_resolve,
             inhibit_options: 0,
             proxy_options: 0,
         }
@@ -514,6 +588,13 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             Some(Check::IsOption("--")),
             pre_options_node_id,
             Some(Reducer::EnableDoubleSlash),
+        );
+
+        self.machine.register_dynamic(
+            pre_options_node_id,
+            Some(Check::IsBatch(self.batch_check.clone())),
+            pre_options_node_id,
+            Some(Reducer::ResolveBatch(self.batch_resolve.clone())),
         );
 
         let options = self.spec.components.iter()
@@ -601,11 +682,11 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             = pre_node_id;
 
         let mut next_action
-            = start_action;
+            = start_action.clone();
 
         for _ in 0..min_len {
             current_node_id = self.attach_required(current_node_id, next_action);
-            next_action = subsequent_actions;
+            next_action = subsequent_actions.clone();
         }
 
         match extra_len {
@@ -621,7 +702,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
                     for _ in 0..extra_len {
                         current_node_id = self.attach_required(current_node_id, next_action);
-                        next_action = subsequent_actions;
+                        next_action = subsequent_actions.clone();
 
                         self.machine.register_shortcut(
                             current_node_id,
@@ -1173,5 +1254,39 @@ fn it_should_aggregate_positional_values_with_rest() {
     assert_eq!(state.values(), vec![
         (0, vec!["foo"]),
         (1, vec!["bar", "baz"]),
+    ]);
+}
+
+#[test]
+fn it_should_parse_batch_options() {
+    let mut cli_builder
+        = CliBuilder::new();
+
+    let spec = CommandSpec {
+        components: vec![
+            Component::Option(OptionSpec::boolean("-V,--verbose")),
+            Component::Option(OptionSpec::boolean("-Q,--quiet")),
+        ],
+        ..Default::default()
+    };
+
+    cli_builder.add_command(&spec);
+
+    let result
+        = cli_builder.run(&["-V"]);
+
+    let Ok(mut selector) = result else {
+        panic!("Expected a selector result");
+    };
+
+    let selector_result
+        = selector.resolve_state(|_| Ok(())).unwrap();
+
+    let SelectionResult::Command(_, state, _) = selector_result else {
+        panic!("Expected a command result: {:?}", selector_result);
+    };
+
+    assert_eq!(state.values(), vec![
+        (0, vec![]),
     ]);
 }

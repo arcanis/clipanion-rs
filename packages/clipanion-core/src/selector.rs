@@ -4,6 +4,7 @@ use itertools::Itertools;
 
 use crate::{shared::SUCCESS_NODE_ID, BuiltinCommand, CommandError, CommandSpec, Component, Error, State};
 
+#[derive(Debug)]
 pub enum SelectionResult<'cmds, 'args, T> {
     Builtin(BuiltinCommand<'cmds>),
     Command(&'cmds CommandSpec, State<'args>, T),
