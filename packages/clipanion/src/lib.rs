@@ -15,6 +15,7 @@ pub mod prelude;
 pub use advanced::Environment;
 
 pub use clipanion_core::{
+    BuiltinCommand,
     CommandError,
     Error,
 };

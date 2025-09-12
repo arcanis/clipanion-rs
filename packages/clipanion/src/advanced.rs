@@ -168,11 +168,16 @@ fn handle_builtin<S: CommandProvider>(builtin: BuiltinCommand, env: &Environment
 }
 
 pub trait Cli {
+    fn run_builtin(env: Environment, builtin: BuiltinCommand) -> std::process::ExitCode;
     fn run(env: Environment) -> std::process::ExitCode;
     fn run_default() -> std::process::ExitCode;
 }
 
 impl<S> Cli for S where S: CliEnums + CommandProvider, S::Enum: CommandExecutor {
+    fn run_builtin(env: Environment, builtin: BuiltinCommand) -> std::process::ExitCode {
+        handle_builtin::<S>(builtin, &env)
+    }
+
     fn run(env: Environment) -> std::process::ExitCode {
         let builder = S::build_cli()
             .unwrap();
@@ -182,7 +187,7 @@ impl<S> Cli for S where S: CliEnums + CommandProvider, S::Enum: CommandExecutor 
 
         match parse_result {
             Ok(SelectionResult::Builtin(builtin)) => {
-                handle_builtin::<S>(builtin, &env)
+                Self::run_builtin(env, builtin)
             },
 
             Ok(SelectionResult::Command(command_spec, _, partial_command)) => {
@@ -216,11 +221,16 @@ impl<S> Cli for S where S: CliEnums + CommandProvider, S::Enum: CommandExecutor 
 }
 
 pub trait CliAsync {
+    fn run_builtin(env: Environment, builtin: BuiltinCommand<'_>) -> impl Future<Output = std::process::ExitCode>;
     fn run(env: Environment) -> impl Future<Output = std::process::ExitCode>;
     fn run_default() -> impl Future<Output = std::process::ExitCode>;
 }
 
 impl<S> CliAsync for S where S: CliEnums + CommandProvider, S::Enum: CommandExecutorAsync {
+    async fn run_builtin(env: Environment, builtin: BuiltinCommand<'_>) -> std::process::ExitCode {
+        handle_builtin::<S>(builtin, &env)
+    }
+
     async fn run(env: Environment) -> std::process::ExitCode {
         let builder = S::build_cli()
             .unwrap();
@@ -230,7 +240,7 @@ impl<S> CliAsync for S where S: CliEnums + CommandProvider, S::Enum: CommandExec
 
         match parse_result {
             Ok(SelectionResult::Builtin(builtin)) => {
-                handle_builtin::<S>(builtin, &env)
+                Self::run_builtin(env, builtin).await
             },
 
             Ok(SelectionResult::Command(command_spec, _, partial_command)) => {
