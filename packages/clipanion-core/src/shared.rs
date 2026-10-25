@@ -42,4 +42,13 @@ pub const CUSTOM_NODE_ID: usize = 3;
 
 pub fn is_terminal_node(id: usize) -> bool {
     id == SUCCESS_NODE_ID || id == ERROR_NODE_ID
-}    
+}
+
+/// Whether `CLIPANION_DEBUG` is set. It's read once: `std::env::var` locks and
+/// scans the environment, and the runner would ask for every transition.
+pub fn is_debug_enabled() -> bool {
+    static IS_DEBUG_ENABLED: std::sync::OnceLock<bool>
+        = std::sync::OnceLock::new();
+
+    *IS_DEBUG_ENABLED.get_or_init(|| std::env::var_os("CLIPANION_DEBUG").is_some())
+}

@@ -1,7 +1,8 @@
-use std::{collections::HashSet, fmt::Debug};
+use std::fmt::Debug;
 
-use crate::{node::Node, shared::{is_terminal_node, ArgKey, CUSTOM_NODE_ID, ERROR_NODE_ID, INITIAL_NODE_ID, SUCCESS_NODE_ID}, transition::Transition};
+use crate::{node::Node, shared::{is_terminal_node, ArgKey, CUSTOM_NODE_ID, ERROR_NODE_ID, INITIAL_NODE_ID, SUCCESS_NODE_ID}, transition::{offset_node_id, Transition}};
 
+#[derive(Clone)]
 pub struct Machine<'a, TCheck, TReducer> {
     pub contexts: Vec<usize>,
     pub nodes: Vec<Node<'a, TCheck, TReducer>>,
@@ -16,6 +17,10 @@ impl<'a, TCheck: Debug, TReducer: Debug> Debug for Machine<'a, TCheck, TReducer>
                 writeln!(f, "  [Error]")?;
             } else if id == SUCCESS_NODE_ID {
                 writeln!(f, "  [Success]")?;
+            }
+
+            if let Some(options) = &node.options {
+                writeln!(f, "  Options{}", if options.help {" (with help)"} else {""})?;
             }
 
             for (check, transition) in node.dynamics.iter() {
@@ -72,7 +77,7 @@ impl<'a, TCheck, TReducer> Machine<'a, TCheck, TReducer> {
         self.nodes[from].statics.entry(key).or_default().push(Transition::new(to, reducer));
     }
 
-    pub fn new_any_of<I>(machines: I) -> Self where TCheck: Clone, TReducer: Clone + Default, I: IntoIterator<Item = Self> {
+    pub fn new_any_of<I>(machines: I) -> Self where TReducer: Default, I: IntoIterator<Item = Self> {
         let mut out = Machine {
             contexts: vec![],
             nodes: vec![],
@@ -92,11 +97,16 @@ impl<'a, TCheck, TReducer> Machine<'a, TCheck, TReducer> {
             out.contexts.extend(machine.contexts);
             out.register_shortcut(INITIAL_NODE_ID, node_offset);
 
-            for id in 0..machine.nodes.len() {
+            // The machines are moved in rather than cloned: building them is most of
+            // what a program does before running its command.
+            for (id, mut node) in machine.nodes.into_iter().enumerate() {
                 if !is_terminal_node(id) {
-                    let mut cloned_node = machine.nodes[id].clone_to_offset(node_offset);
-                    cloned_node.context += context_offset;
-                    out.nodes.push(cloned_node);
+                    for transition in node.transitions_mut() {
+                        transition.to = offset_node_id(transition.to, node_offset);
+                    }
+
+                    node.context += context_offset;
+                    out.nodes.push(node);
                 }
             }
         }
@@ -109,7 +119,7 @@ impl<'a, TCheck, TReducer> Machine<'a, TCheck, TReducer> {
             let node
                 = &self.nodes[id];
 
-            if node.shortcuts.len() != 1 || !node.statics.is_empty() || !node.dynamics.is_empty() {
+            if node.shortcuts.len() != 1 || !node.statics.is_empty() || !node.dynamics.is_empty() || node.options.is_some() {
                 break;
             }
 
@@ -119,80 +129,54 @@ impl<'a, TCheck, TReducer> Machine<'a, TCheck, TReducer> {
         id
     }
 
-    pub fn simplify_machine(&mut self) where TCheck: Debug + Clone + PartialEq, TReducer: Debug, Node<'a, TCheck, TReducer>: Clone, Transition<TReducer>: Clone {
+    /// Skips the nodes that only lead to another one, and removes the nodes that
+    /// can't be reached anymore.
+    pub fn simplify_machine(&mut self) {
+        let passthroughs
+            = (0..self.nodes.len())
+                .map(|id| self.resolve_passthrough(id))
+                .collect::<Vec<_>>();
+
         let mut visited
-            = HashSet::new();
+            = vec![false; self.nodes.len()];
 
         let mut queue
             = vec![INITIAL_NODE_ID];
 
         while let Some(node_id) = queue.pop() {
-            let mut node
-                = self.nodes[node_id].clone();
+            for transition in self.nodes[node_id].transitions_mut() {
+                transition.to = passthroughs[transition.to];
 
-            for (_, transition) in node.dynamics.iter_mut() {
-                transition.to = self.resolve_passthrough(transition.to);
-                if visited.insert(transition.to) {
+                if !visited[transition.to] {
+                    visited[transition.to] = true;
                     queue.push(transition.to);
                 }
             }
+        }
 
-            for (_, transitions) in node.statics.iter_mut() {
-                for transition in transitions.iter_mut() {
-                    transition.to = self.resolve_passthrough(transition.to);
-                    if visited.insert(transition.to) {
-                        queue.push(transition.to);
-                    }
-                }
+        let mut map_offset
+            = vec![usize::MAX; self.nodes.len()];
+
+        let mut out_offset
+            = 0;
+
+        for (in_offset, mapped) in map_offset.iter_mut().enumerate() {
+            if in_offset < CUSTOM_NODE_ID || visited[in_offset] {
+                *mapped = out_offset;
+                out_offset += 1;
             }
-
-            for transition in node.shortcuts.iter_mut() {
-                transition.to = self.resolve_passthrough(transition.to);
-                if visited.insert(transition.to) {
-                    queue.push(transition.to);
-                }
-            }
-
-            std::mem::swap(
-                &mut self.nodes[node_id],
-                &mut node,
-            );
         }
 
         let mut in_offset = 0;
-        let mut out_offset = 0;
-
-        let mut map_offset = Vec::with_capacity(self.nodes.len());
-        map_offset.resize(self.nodes.len(), 99);
 
         self.nodes.retain(|_| {
-            if in_offset < CUSTOM_NODE_ID || visited.contains(&in_offset) {
-                map_offset[in_offset] = out_offset;
-
-                in_offset += 1;
-                out_offset += 1;
-
-                true
-            } else {
-                in_offset += 1;
-
-                false
-            }
+            in_offset += 1;
+            map_offset[in_offset - 1] != usize::MAX
         });
 
         for node in self.nodes.iter_mut() {
-            for (_, transition) in node.dynamics.iter_mut() {
+            for transition in node.transitions_mut() {
                 transition.to = map_offset[transition.to];
-            }
-
-            for transition in node.shortcuts.iter_mut() {
-                transition.to = map_offset[transition.to];
-            }
-
-            for (_, transitions) in node.statics.iter_mut() {
-                for transition in transitions.iter_mut() {
-                    transition.to = map_offset[transition.to];
-                }
             }
         }
     }

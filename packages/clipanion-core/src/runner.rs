@@ -1,66 +1,29 @@
-use std::fmt::Debug;
+use crate::{builder::{CliMachine, CommandSpec, Component, OptionSpec, Reducer, State}, node::NodeOptions, options::{self, OptionWord, PendingValues}, shared::{is_debug_enabled, Arg, UserArg, ERROR_NODE_ID, INITIAL_NODE_ID}, transition::Transition};
 
-use crate::{shared::{Arg, UserArg, ERROR_NODE_ID, INITIAL_NODE_ID}, transition::Transition, Machine};
+/// Runs the machine of a program over its arguments. The machine says where
+/// keywords and positionals go; the options are read from the commands' specs,
+/// on the nodes the machine marks (see `options.rs`).
+pub struct Runner<'machine, 'cmds, 'args> {
+    machine: &'machine CliMachine<'cmds>,
+    commands: &'machine [&'cmds CommandSpec],
 
-pub trait RunnerState {
-    fn get_context_id(&self) -> usize;
-    fn set_context_id(&mut self, context_id: usize);
-
-    fn get_node_id(&self) -> usize;
-    fn set_node_id(&mut self, node_id: usize);
-
-    fn get_keyword_count(&self) -> usize;
-}
-
-pub trait ValidateTransition<'args, TState> {
-    fn check(&self, state: &TState, arg: &'args str) -> bool;
-}
-
-impl<'args, T, TState> ValidateTransition<'args, TState> for Option<T> where T: ValidateTransition<'args, TState> {
-    fn check(&self, state: &TState, arg: &'args str) -> bool {
-        self.as_ref().map_or(true, |reducer| reducer.check(state, arg))
-    }
-}
-
-pub trait DeriveState<'args, TState> {
-    fn derive(&self, state: &mut TState, target_id: usize, arg: Arg<'args>) -> () where TState: RunnerState;
-}
-
-impl<'args, T, TState> DeriveState<'args, TState> for Option<T> where T: DeriveState<'args, TState> {
-    fn derive(&self, state: &mut TState, target_id: usize, arg: Arg<'args>) -> () where TState: RunnerState {
-        if let Some(reducer) = self {
-            reducer.derive(state, target_id, arg)
-        }
-
-        state.set_node_id(target_id);
-    }
-}
-
-pub struct Runner<'machine, 'cmds, TCheck, TReducer, TFallback, TState> {
-    machine: &'machine Machine<'cmds, TCheck, TReducer>,
-    fallback: TFallback,
-
-    states: Vec<TState>,
-    next_states: Vec<TState>,
+    states: Vec<State<'args>>,
+    next_states: Vec<State<'args>>,
 
     // Colors are used to avoid infinite loops.
     node_colors: Vec<usize>,
     current_color: usize,
+
+    debug: bool,
 }
 
-impl<'machine, 'cmds, TCheck, TReducer, TFallback, TState> Runner<'machine, 'cmds, TCheck, TReducer, TFallback, TState> {
+impl<'machine, 'cmds, 'args> Runner<'machine, 'cmds, 'args> {
     /**
      * Run the state machine with the given arguments.
      */
-    pub fn run<'args>(machine: &'machine Machine<'cmds, TCheck, TReducer>, fallback: TFallback, args: &[&'args str]) -> Vec<TState>
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TFallback: Fn(TState, Arg<'args>) -> TState,
-        TState: Clone + RunnerState + Debug + Default
-    {
+    pub fn run(machine: &'machine CliMachine<'cmds>, commands: &'machine [&'cmds CommandSpec], args: &[&'args str]) -> Vec<State<'args>> {
         let mut runner
-            = Runner::<'machine, 'cmds, TCheck, TReducer, TFallback, TState>::new(machine, fallback);
+            = Runner::new(machine, commands);
 
         runner.send(args);
 
@@ -74,132 +37,110 @@ impl<'machine, 'cmds, TCheck, TReducer, TFallback, TState> Runner<'machine, 'cmd
      * want to obtain information about a partial command line (for example in a documentation
      * you often want to reference a command but not provide all the arguments).
      */
-    pub fn run_partial<'args>(machine: &'machine Machine<'cmds, TCheck, TReducer>, fallback: TFallback, args: &[&'args str]) -> Vec<TState>
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TFallback: Fn(TState, Arg<'args>) -> TState,
-        TState: Clone + RunnerState + Debug + Default
-    {
+    pub fn run_partial(machine: &'machine CliMachine<'cmds>, commands: &'machine [&'cmds CommandSpec], args: &[&'args str]) -> Vec<State<'args>> {
         let mut runner
-            = Runner::<'machine, 'cmds, TCheck, TReducer, TFallback, TState>::new(machine, fallback);
+            = Runner::new(machine, commands);
 
         runner.send(args);
 
         runner.states.retain(|state| {
-            state.get_node_id() != ERROR_NODE_ID
+            state.node_id != ERROR_NODE_ID
         });
 
         runner.digest()
     }
 
-    pub fn new<'args>(machine: &'machine Machine<'cmds, TCheck, TReducer>, fallback: TFallback) -> Self
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TState: Clone + RunnerState + Debug + Default
-    {
+    pub fn new(machine: &'machine CliMachine<'cmds>, commands: &'machine [&'cmds CommandSpec]) -> Self {
         let mut runner = Runner {
+            machine,
+            commands,
             states: vec![],
             next_states: vec![],
-            machine,
-            fallback,
             node_colors: vec![0; machine.nodes.len()],
             current_color: 0,
+            debug: is_debug_enabled(),
         };
 
         let initial_state
-            = TState::default();
+            = State::default();
 
         runner.next_states.push(initial_state.clone());
 
-        let initial_node
-            = runner.machine.nodes.get(INITIAL_NODE_ID)
-                .unwrap();
-
-        for shortcut in &initial_node.shortcuts {
+        for shortcut in &machine.nodes[INITIAL_NODE_ID].shortcuts {
             runner.transition_to(&initial_state, shortcut, Arg::StartOfInput);
         }
 
-        runner.states = runner.next_states.into_iter().collect();
-        runner.next_states = vec![];
-
+        runner.states = std::mem::take(&mut runner.next_states);
         runner
     }
 
-    fn send<'args>(&mut self, args: &[&'args str])
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TFallback: Fn(TState, Arg<'args>) -> TState,
-        TState: Clone + RunnerState,
-        TState: Default + std::fmt::Debug
-    {
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+    fn send(&mut self, args: &[&'args str]) {
+        if self.debug {
             println!("========== Parsing ==========");
         }
 
         self.update(Arg::StartOfInput);
 
+        let machine
+            = self.machine;
+
         for state in self.states.iter_mut() {
-            let node
-                = &self.machine.nodes[state.get_node_id()];
-
-            state.set_context_id(node.context);
+            state.context_id = machine.nodes[state.node_id].context;
         }
 
-        for (arg_index, arg) in args.iter().enumerate() {
-            self.update(Arg::User(UserArg { value: arg, index: arg_index }));
+        for (index, value) in args.iter().enumerate() {
+            self.update(Arg::User(UserArg {value, index}));
         }
     }
 
-    fn transition_to<'args>(&mut self, from_state: &TState, transition: &Transition<TReducer>, token: Arg<'args>) -> ()
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TState: Clone + RunnerState + Debug
-    {
-        self.current_color = self.current_color.wrapping_add(1);
-        self.transition_to_color(from_state, transition, token, self.current_color);
-    }
-
-    fn transition_to_color<'args>(&mut self, from_state: &TState, transition: &Transition<TReducer>, token: Arg<'args>, color: usize) -> ()
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TState: Clone + RunnerState + Debug
-    {
+    fn transition_to(&mut self, from_state: &State<'args>, transition: &Transition<Option<Reducer>>, token: Arg<'args>) {
         let mut next_state
             = from_state.clone();
 
-        transition.reducer.derive(&mut next_state, transition.to, token);
-
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
-            println!("  [{}] {} -> {} (reducer: {:?})", from_state.get_context_id(), from_state.get_node_id(), transition.to, transition.reducer);
+        if let Some(reducer) = &transition.reducer {
+            reducer.apply(&mut next_state, token);
         }
 
-        self.node_colors[transition.to] = color;
+        if self.debug {
+            println!("  [{}] {} -> {} (reducer: {:?})", from_state.context_id, from_state.node_id, transition.to, transition.reducer);
+        }
 
-        let target_node
-            = &self.machine.nodes[transition.to];
+        self.enter(next_state, transition.to);
+    }
 
-        for shortcut in &target_node.shortcuts {
+    /// Puts `state` on `node_id`, and on the nodes its shortcuts lead to.
+    fn enter(&mut self, state: State<'args>, node_id: usize) {
+        self.current_color = self.current_color.wrapping_add(1);
+        self.enter_with_color(state, node_id, self.current_color);
+    }
+
+    fn enter_with_color(&mut self, mut state: State<'args>, node_id: usize, color: usize) {
+        state.node_id = node_id;
+        self.node_colors[node_id] = color;
+
+        let machine
+            = self.machine;
+
+        for shortcut in &machine.nodes[node_id].shortcuts {
             if self.node_colors[shortcut.to] != color {
-                self.transition_to_color(&next_state, shortcut, token, color);
+                if self.debug {
+                    println!("  [{}] {} -> {} (shortcut)", state.context_id, node_id, shortcut.to);
+                }
+
+                self.enter_with_color(state.clone(), shortcut.to, color);
             }
         }
 
-        self.next_states.push(next_state);
+        self.next_states.push(state);
     }
 
-    pub fn update<'args>(&mut self, token: Arg<'args>) -> ()
-    where
-        TCheck: ValidateTransition<'args, TState>,
-        TReducer: DeriveState<'args, TState> + Debug,
-        TFallback: Fn(TState, Arg<'args>) -> TState,
-        TState: Clone + RunnerState + Debug
-    {
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+    fn fail(&mut self, mut state: State<'args>) {
+        state.node_id = ERROR_NODE_ID;
+        self.next_states.push(state);
+    }
+
+    pub fn update(&mut self, token: Arg<'args>) {
+        if self.debug {
             println!("{:?}", token);
         }
 
@@ -207,66 +148,195 @@ impl<'machine, 'cmds, TCheck, TReducer, TFallback, TState> Runner<'machine, 'cmd
             = std::mem::take(&mut self.states);
 
         for state in states {
-            if state.get_node_id() == ERROR_NODE_ID {
+            if state.node_id == ERROR_NODE_ID {
                 self.next_states.push(state);
                 continue;
             }
 
-            let current_node
-                = self.machine.nodes.get(state.get_node_id())
-                    .unwrap();
+            match (token, state.pending_values) {
+                (Arg::User(arg), Some(pending)) => {
+                    self.feed_value(state, pending, arg);
+                },
 
-            let mut transitioned
-                = false;
+                // The input ended while an option was waiting for values.
+                (_, Some(_)) => {
+                    self.fail(state);
+                },
 
-            let transitions
-                = current_node.statics.get(&token.into());
-
-            if let Some(transitions) = transitions {
-                for transition in transitions {
-                    self.transition_to(&state, transition, token);
-                    transitioned = true;
-                }
-            }
-
-            if let Arg::User(UserArg { value: raw, .. }) = &token {
-                for (check, transition) in &current_node.dynamics {
-                    if check.check(&state, raw) {
-                        self.transition_to(&state, transition, token);
-                        transitioned = true;
-                    }
-                }
-            }
-
-            if !transitioned {
-                self.next_states.push((self.fallback)(state, token));
+                (_, None) => {
+                    self.feed(state, token);
+                },
             }
         }
 
-        let next_states
-            = std::mem::take(&mut self.next_states);
-
         self.states
-            = next_states;
+            = std::mem::take(&mut self.next_states);
 
         self.trim_shortest_branches();
     }
 
-    fn trim_shortest_branches(&mut self) -> ()
-    where
-        TState: RunnerState
-    {
-        let max_keyword_count
-            = self.states.iter()
-                .map(|state| state.get_keyword_count())
-                .max();
+    fn feed(&mut self, state: State<'args>, token: Arg<'args>) {
+        let machine
+            = self.machine;
 
-        if let Some(max_keyword_count) = max_keyword_count {
-            self.states.retain(|state| state.get_keyword_count() == max_keyword_count);
+        let node
+            = &machine.nodes[state.node_id];
+
+        let mut transitioned
+            = false;
+
+        if let Some(transitions) = node.statics.get(&token.into()) {
+            for transition in transitions {
+                self.transition_to(&state, transition, token);
+                transitioned = true;
+            }
+        }
+
+        if let Arg::User(arg) = token {
+            let spec
+                = self.commands[state.context_id];
+
+            let option_word = match node.options {
+                Some(NodeOptions {help}) if !state.post_double_dash => options::parse_option_word(spec, arg.value, help),
+                _ => None,
+            };
+
+            if let Some(option_word) = option_word {
+                self.apply_option_word(&state, spec, option_word, arg);
+                transitioned = true;
+            }
+
+            for (check, transition) in &node.dynamics {
+                if check.as_ref().is_none_or(|check| check.check(spec, &state, arg.value)) {
+                    self.transition_to(&state, transition, token);
+                    transitioned = true;
+                }
+            }
+        }
+
+        if !transitioned {
+            self.fail(state);
         }
     }
 
-    pub fn digest(self) -> Vec<TState> {
+    /// Applies an option word read on the state's node, where the state stays.
+    fn apply_option_word(&mut self, state: &State<'args>, spec: &CommandSpec, option_word: OptionWord, arg: UserArg<'args>) {
+        let mut next_state
+            = state.clone();
+
+        match option_word {
+            OptionWord::EndOfOptions => {
+                next_state.post_double_dash = true;
+                next_state.push_syntax(arg);
+
+                self.enter(next_state, state.node_id);
+            },
+
+            OptionWord::Help => {
+                next_state.is_help = true;
+                next_state.push_syntax(arg);
+
+                self.fail(next_state);
+            },
+
+            OptionWord::Options(option_uses) => {
+                let mut can_go_without_values
+                    = false;
+
+                for option_use in &option_uses {
+                    next_state.start_option(arg, option_use);
+
+                    if option_use.value.is_none() {
+                        if let Some((pending, optional)) = options::values_after_name(option_spec(spec, option_use.option_id)) {
+                            next_state.pending_values = Some(pending);
+                            can_go_without_values = optional;
+                        }
+                    }
+                }
+
+                if can_go_without_values {
+                    let mut without_values
+                        = next_state.clone();
+
+                    without_values.pending_values = None;
+                    self.enter(without_values, state.node_id);
+                }
+
+                self.settle(next_state, state.node_id);
+            },
+        }
+    }
+
+    /// Gives a value to the option the state waits for.
+    fn feed_value(&mut self, mut state: State<'args>, mut pending: PendingValues, arg: UserArg<'args>) {
+        if !options::accepts_value(arg.value) {
+            return self.fail(state);
+        }
+
+        state.push_option_value(arg);
+
+        if pending.required > 0 {
+            pending.required -= 1;
+        } else {
+            pending.extra = pending.extra.map(|extra| extra - 1);
+        }
+
+        state.pending_values = Some(pending);
+
+        let node_id
+            = state.node_id;
+
+        self.settle(state, node_id);
+    }
+
+    /// Puts back on its node a state that read an option, or one of its values:
+    /// the option is done, or waits for more values, or both when the values it
+    /// can still take are optional.
+    fn settle(&mut self, mut state: State<'args>, node_id: usize) {
+        match state.pending_values {
+            Some(pending) if pending.required > 0 => {
+                // Only its values can follow: the node's other transitions wait.
+                state.node_id = node_id;
+                self.next_states.push(state);
+            },
+
+            Some(pending) if pending.extra != Some(0) => {
+                let mut done
+                    = state.clone();
+
+                done.pending_values = None;
+                self.enter(done, node_id);
+
+                state.node_id = node_id;
+                self.next_states.push(state);
+            },
+
+            _ => {
+                state.pending_values = None;
+                self.enter(state, node_id);
+            },
+        }
+    }
+
+    fn trim_shortest_branches(&mut self) {
+        let max_keyword_count
+            = self.states.iter()
+                .map(|state| state.keyword_count)
+                .max();
+
+        if let Some(max_keyword_count) = max_keyword_count {
+            self.states.retain(|state| state.keyword_count == max_keyword_count);
+        }
+    }
+
+    pub fn digest(self) -> Vec<State<'args>> {
         self.states
+    }
+}
+
+fn option_spec(spec: &CommandSpec, option_id: usize) -> &OptionSpec {
+    match &spec.components[option_id] {
+        Component::Option(option) => option,
+        _ => unreachable!("Expected an option"),
     }
 }

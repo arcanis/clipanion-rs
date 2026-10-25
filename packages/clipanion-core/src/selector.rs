@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use itertools::Itertools;
 
-use crate::{shared::{ERROR_NODE_ID, SUCCESS_NODE_ID}, BuiltinCommand, CommandError, CommandSpec, Component, Error, State};
+use crate::{shared::{is_debug_enabled, ERROR_NODE_ID, SUCCESS_NODE_ID}, BuiltinCommand, CommandError, CommandSpec, Component, Error, State};
 
 #[derive(Debug)]
 pub enum SelectionResult<'cmds, 'args, T> {
@@ -399,7 +399,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             return Ok(SelectionResult::Builtin(builtin));
         }
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Pre-selection states ==========");
 
             for state in &self.states {
@@ -421,7 +421,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
 
         self.fail_missing_required_options()?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== After failing missing required options ==========");
 
             for state in &self.states {
@@ -429,14 +429,14 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             }
         }
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Candidate filtering ==========");
             println!("initial candidates: {:?}", self.candidates);
         }
 
         self.prune_unsuccessful_nodes()?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_unsuccessful_nodes: {:?}", self.candidates);
         }
 
@@ -457,19 +457,19 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
 
         self.prune_by_hydration_results(unsuccessful_hydrations)?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_hydration_results: {:?}", self.candidates);
         }
 
         self.prune_by_greediness();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_greediness: {:?}", self.candidates);
         }
 
         self.prune_by_unused_positionals();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_empty_positional_values: {:?}", self.candidates);
         }
 
@@ -491,7 +491,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
         let index
             = owned_candidates.first().unwrap();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Selected state ==========");
             println!("{:?}", self.states[*index]);
         }

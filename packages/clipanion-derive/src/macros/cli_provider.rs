@@ -90,7 +90,7 @@ pub fn cli_provider_macro(_args: TokenStream, mut input: DeriveInput) -> Result<
 
                 #(builder.add_command(<#variant_tys>::command_spec()?);)*
 
-                if std::env::var("CLIPANION_DEBUG").is_ok() {
+                if clipanion::core::is_debug_enabled() {
                     println!("========== CLI State Machine ==========");
                     println!("{:?}", builder.compile());
                 }

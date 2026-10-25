@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    builder::{Attachment, Check, CommandSpec, Component, OptionSpec, PositionalSpec, Reducer, State},
-    runner::{Runner, RunnerState},
-    shared::{Arg, ArgKey, ERROR_NODE_ID},
-    Machine,
+    builder::{CliMachine, CommandSpec, Component, PositionalSpec, Reducer},
+    runner::Runner,
+    shared::{ArgKey, ERROR_NODE_ID},
 };
 
 /// A single completion candidate
@@ -89,8 +88,6 @@ pub struct CompletionResult {
     pub completions: Vec<Completion>,
 }
 
-type CliMachine<'cmds> = Machine<'cmds, Option<Check<'cmds>>, Option<Reducer>>;
-
 /// Compute completions for a CLI given the current context
 pub fn compute_completions<'cmds, 'args>(
     commands: &[&'cmds CommandSpec],
@@ -99,7 +96,7 @@ pub fn compute_completions<'cmds, 'args>(
 ) -> CompletionResult {
     // Run the machine with the arguments before the current token to get the current states
     let states
-        = run_machine_partial(machine, &context.args_before);
+        = Runner::run_partial(machine, commands, &context.args_before);
 
     // Now analyze each state to find valid completions
     // Use a BTreeMap keyed by text so that entries with descriptions
@@ -170,13 +167,20 @@ pub fn compute_completions<'cmds, 'args>(
             let mut option_candidates: Vec<Completion>
                 = Vec::new();
 
-            for (check, _) in &node.dynamics {
-                if let Some(Check::IsOption(name)) = check {
-                    // Don't suggest -- or -h/--help which are special
-                    if *name == "--" || *name == "-h" || *name == "--help" {
-                        continue;
-                    }
+            // Options can be given on this node, unless an option waits for its
+            // values, or `--` ended them.
+            let accepts_options
+                = node.options.is_some()
+                    && state.pending_values.is_none()
+                    && !state.post_double_dash;
 
+            let options = command.into_iter()
+                .filter(|_| accepts_options)
+                .flat_map(|cmd| cmd.components.iter().enumerate())
+                .filter_map(|(component_id, component)| component.is_option().map(|option| (component_id, option)));
+
+            for (component_id, opt) in options {
+                for name in opt.all_names() {
                     // Only suggest long options (--foo), not short options (-f)
                     if !name.starts_with("--") {
                         continue;
@@ -184,26 +188,21 @@ pub fn compute_completions<'cmds, 'args>(
 
                     // Check if the current partial matches
                     if name.starts_with(context.current) {
-                        if let Some(cmd) = command {
-                            if let Some((component_id, opt)) = find_option_with_id_by_name(cmd, name) {
-                                let is_single_use
-                                    = opt.extra_len.is_some();
+                        let is_single_use
+                            = opt.extra_len.is_some();
 
-                                if is_single_use && used_option_ids.contains(&component_id) {
-                                    continue;
-                                }
-
-                                let mut completion
-                                    = Completion::new(*name).as_option();
-
-                                if let Some(doc) = &opt.documentation {
-                                    completion = completion.with_description(doc.description.clone());
-                                }
-                                option_candidates.push(completion);
-                            }
-                        } else {
-                            option_candidates.push(Completion::new(*name).as_option());
+                        if is_single_use && used_option_ids.contains(&component_id) {
+                            continue;
                         }
+
+                        let mut completion
+                            = Completion::new(name).as_option();
+
+                        if let Some(doc) = &opt.documentation {
+                            completion = completion.with_description(doc.description.clone());
+                        }
+
+                        option_candidates.push(completion);
                     }
                 }
             }
@@ -217,15 +216,15 @@ pub fn compute_completions<'cmds, 'args>(
                 }
             }
 
-            for (check, transition) in &node.dynamics {
-                match check {
-                    Some(Check::IsNotOptionLike) | None => {
+            for (_, transition) in &node.dynamics {
+                match &transition.reducer {
+                    Some(Reducer::StartPositional(_) | Reducer::PushPositional) if state.pending_values.is_none() => {
                         // Positional argument — invoke completer if available
                         if let Some(cmd) = command {
                             let component_id
                                 = match &transition.reducer {
-                                    Some(Reducer::StartValue(Attachment::Positional, id)) => Some(*id),
-                                    Some(Reducer::PushValue(Attachment::Positional)) => {
+                                    Some(Reducer::StartPositional(id)) => Some(*id),
+                                    Some(Reducer::PushPositional) => {
                                         state.positional_values.last().map(|(id, _)| *id)
                                     }
                                     _ => None,
@@ -306,29 +305,6 @@ fn has_reachable_keyword(machine: &CliMachine, start_node_id: usize) -> bool {
     }
 
     false
-}
-
-fn find_option_with_id_by_name<'cmds>(command: &'cmds CommandSpec, name: &str) -> Option<(usize, &'cmds OptionSpec)> {
-    command.components.iter().enumerate().find_map(|(id, component)| {
-        if let Component::Option(opt) = component {
-            if opt.all_names().any(|n| n == name) {
-                return Some((id, opt));
-            }
-        }
-        None
-    })
-}
-
-fn run_machine_partial<'cmds, 'args>(
-    machine: &CliMachine<'cmds>,
-    args: &[&'args str],
-) -> Vec<State<'args>> {
-    fn on_error<'args>(mut state: State<'args>, _: Arg<'args>) -> State<'args> {
-        state.set_node_id(ERROR_NODE_ID);
-        state
-    }
-
-    Runner::run_partial(machine, on_error, args)
 }
 
 /// Generate shell completion script
@@ -538,7 +514,7 @@ complete -c {binary_name} -f -a '(__fish_{binary_name}_completions)'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{builder::{CliBuilder, Documentation}, PositionalSpec};
+    use crate::{builder::{CliBuilder, Documentation, OptionSpec}, PositionalSpec};
 
     fn create_simple_cli() -> Vec<CommandSpec> {
         vec![

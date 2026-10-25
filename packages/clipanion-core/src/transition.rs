@@ -15,19 +15,15 @@ impl<TReducer> Transition<TReducer> {
     }
 }
 
-impl<TReducer: Clone> Transition<TReducer> {
-    pub fn clone_to_offset(&self, offset: usize) -> Transition<TReducer> {
-        let to = if is_terminal_node(self.to) {
-            self.to
-        } else if self.to >= CUSTOM_NODE_ID {
-            self.to + offset - CUSTOM_NODE_ID + 1
-        } else {
-            self.to + offset
-        };
-    
-        Transition {
-            to,
-            reducer: self.reducer.clone(),
-        }
+/// Where a node of a machine lands once the machine is merged into another one
+/// at `offset` (see `Machine::new_any_of`): the terminal nodes are shared, the
+/// other ones follow each other.
+pub fn offset_node_id(id: usize, offset: usize) -> usize {
+    if is_terminal_node(id) {
+        id
+    } else if id >= CUSTOM_NODE_ID {
+        id + offset - CUSTOM_NODE_ID + 1
+    } else {
+        id + offset
     }
 }
