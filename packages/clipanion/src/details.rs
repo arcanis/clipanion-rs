@@ -97,7 +97,7 @@ impl<T: Into<CommandResult>, E: std::fmt::Display> From<Result<T, E>> for Comman
 pub trait CommandController {
     type Partial;
 
-    fn command_usage(opts: clipanion_core::CommandUsageOptions) -> Result<clipanion_core::CommandUsageResult, clipanion_core::BuildError>;
+    fn command_usage(opts: clipanion_core::CommandUsageOptions) -> Result<clipanion_core::CommandUsageResult<'static>, clipanion_core::BuildError>;
     fn command_spec() -> Result<&'static CommandSpec, clipanion_core::BuildError>;
     fn hydrate_from_state(environment: &Environment, state: &clipanion_core::State) -> Result<Self::Partial, clipanion_core::CommandError> where Self: Sized;
 }
@@ -118,7 +118,7 @@ pub trait CliEnums {
 pub trait CommandProvider {
     type Command;
 
-    fn command_usage(command_index: usize, opts: clipanion_core::CommandUsageOptions) -> Result<clipanion_core::CommandUsageResult, clipanion_core::BuildError>;
+    fn command_usage(command_index: usize, opts: clipanion_core::CommandUsageOptions) -> Result<clipanion_core::CommandUsageResult<'static>, clipanion_core::BuildError>;
 
     fn registered_commands() -> Result<Vec<&'static CommandSpec>, clipanion_core::BuildError>;
     fn parse_args<'args>(builder: &clipanion_core::CliBuilder<'static>, environment: &'args Environment) -> Result<SelectionResult<'static, 'args, Self::PartialEnum>, clipanion_core::Error<'args>> where Self: Sized + CliEnums;

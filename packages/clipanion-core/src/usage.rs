@@ -7,12 +7,13 @@ pub struct CommandUsageOptions {
     pub inline_options: bool,
 }
 
-pub struct CommandUsageResult {
-    pub command_spec: CommandSpec,
+/// A command's usage, borrowing its spec.
+pub struct CommandUsageResult<'cmds> {
+    pub command_spec: &'cmds CommandSpec,
 }
 
-impl CommandUsageResult {
-    pub fn new(command_spec: CommandSpec) -> Self {
+impl<'cmds> CommandUsageResult<'cmds> {
+    pub fn new(command_spec: &'cmds CommandSpec) -> Self {
         Self {
             command_spec,
         }

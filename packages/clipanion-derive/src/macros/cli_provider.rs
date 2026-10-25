@@ -36,10 +36,10 @@ pub fn cli_provider_macro(_args: TokenStream, mut input: DeriveInput) -> Result<
         impl clipanion::details::CommandProvider for #enum_ident {
             type Command = #enum_ident;
 
-            fn command_usage(command_index: usize, opts: clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult, clipanion::core::BuildError> {
+            fn command_usage(command_index: usize, opts: clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult<'static>, clipanion::core::BuildError> {
                 use clipanion::details::CommandController;
 
-                const FNS: &[fn(clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult, clipanion::core::BuildError>] = &[
+                const FNS: &[fn(clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult<'static>, clipanion::core::BuildError>] = &[
                     #(<#variant_tys>::command_usage,)*
                 ];
 
@@ -90,7 +90,7 @@ pub fn cli_provider_macro(_args: TokenStream, mut input: DeriveInput) -> Result<
 
                 #(builder.add_command(<#variant_tys>::command_spec()?);)*
 
-                if std::env::var("CLIPANION_DEBUG").is_ok() {
+                if clipanion::core::is_debug_enabled() {
                     println!("========== CLI State Machine ==========");
                     println!("{:?}", builder.compile());
                 }

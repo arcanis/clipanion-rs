@@ -50,11 +50,11 @@ fn gen_random_values<R: Rng>(rng: &mut R, min_len: usize, extra_len: Option<usiz
 fn gen_random_positional_spec<R: Rng>(rng: &mut R, use_optional_positionals: bool) -> PositionalSpec {
     match rng.random_range(0..=1) {
         0 => PositionalSpec::Keyword {
-            expected: gen_random_keyword(rng),
+            expected: gen_random_keyword(rng).into(),
         },
 
         1 => PositionalSpec::Dynamic {
-            name: "positional".to_string(),
+            name: "positional".into(),
             documentation: None,
             min_len: rng.random_range(0..3),
             extra_len: match use_optional_positionals {
@@ -72,8 +72,8 @@ fn gen_random_positional_spec<R: Rng>(rng: &mut R, use_optional_positionals: boo
 
 fn gen_random_option_spec<R: Rng>(rng: &mut R, use_optional_positionals: bool) -> OptionSpec {
     OptionSpec {
-        primary_name: gen_random_option_name(rng),
-        aliases: vec![],
+        primary_name: gen_random_option_name(rng).into(),
+        aliases: vec![].into(),
         documentation: None,
         default_value: None,
         min_len: rng.random_range(0..3),
@@ -113,7 +113,7 @@ fn gen_random_command_spec<R: Rng>(rng: &mut R, use_optional_positionals: bool) 
     }
 
     CommandSpec {
-        components,
+        components: components.into(),
         ..Default::default()
     }
 }
@@ -203,7 +203,7 @@ fn gen_random_command_line<R: Rng>(rng: &mut R, command_spec: &CommandSpec, comm
             Component::Positional(positional_spec) => {
                 match positional_spec {
                     PositionalSpec::Keyword {expected, ..} => {
-                        positionals.push(expected.clone());
+                        positionals.push(expected.to_string());
                     },
 
                     PositionalSpec::Dynamic {..} => {

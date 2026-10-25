@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use itertools::Itertools;
 
-use crate::{shared::{ERROR_NODE_ID, SUCCESS_NODE_ID}, BuiltinCommand, CommandError, CommandSpec, Component, Error, State};
+use crate::{shared::{is_debug_enabled, ERROR_NODE_ID, SUCCESS_NODE_ID}, BuiltinCommand, CommandError, CommandSpec, Component, Error, State};
 
 #[derive(Debug)]
 pub enum SelectionResult<'cmds, 'args, T> {
@@ -10,16 +10,18 @@ pub enum SelectionResult<'cmds, 'args, T> {
     Command(&'cmds CommandSpec, State<'args>, T),
 }
 
+/// Picks the command the states of a run select. It borrows the commands and
+/// the arguments it was run with.
 #[derive(Debug, Clone)]
-pub struct Selector<'cmds, 'args> {
-    pub commands: Vec<&'cmds CommandSpec>,
-    pub args: Vec<&'args str>,
+pub struct Selector<'a, 'cmds, 'args> {
+    pub commands: &'a [&'cmds CommandSpec],
+    pub args: &'a [&'args str],
     pub states: Vec<State<'args>>,
     pub candidates: Vec<usize>,
 }
 
-impl<'cmds, 'args> Selector<'cmds, 'args> {
-    pub fn new(commands: Vec<&'cmds CommandSpec>, args: Vec<&'args str>, states: Vec<State<'args>>) -> Self {
+impl<'a, 'cmds, 'args> Selector<'a, 'cmds, 'args> {
+    pub fn new(commands: &'a [&'cmds CommandSpec], args: &'a [&'args str], states: Vec<State<'args>>) -> Self {
         let candidates = (0..states.len()).collect();
 
         Self {
@@ -30,7 +32,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
         }
     }
 
-    fn prune_unsuccessful_nodes<'a>(&mut self) -> Result<(), Error<'cmds>> {
+    fn prune_unsuccessful_nodes(&mut self) -> Result<(), Error<'cmds>> {
         let owned_candidates
             = std::mem::take(&mut self.candidates);
 
@@ -43,7 +45,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
         Ok(())
     }
 
-    fn fail_missing_required_options<'a>(&mut self) -> Result<(), Error<'cmds>> {
+    fn fail_missing_required_options(&mut self) -> Result<(), Error<'cmds>> {
         let mut has_valid_states
             = false;
         let mut has_otherwise_valid_states
@@ -63,7 +65,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             let missing_required_options
                 = command.required_options.iter()
                     .filter(|&option_id| !state.option_values.iter().any(|(id, _)| id == option_id))
-                    .map(|option_id| self.commands[state.context_id].components[*option_id].is_option().unwrap().primary_name.as_str())
+                    .map(|option_id| self.commands[state.context_id].components[*option_id].is_option().unwrap().primary_name())
                     .collect::<Vec<_>>();
 
             if missing_required_options.len() == 0 {
@@ -135,7 +137,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
      * 
      * The first option is more greedy, so we remove the second one.
      */
-    fn prune_by_greediness<'a>(&mut self) {
+    fn prune_by_greediness(&mut self) {
         let owned_candidates
             = std::mem::take(&mut self.candidates);
 
@@ -254,7 +256,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             .collect::<Vec<_>>();
     }
 
-    fn prune_by_unused_positionals<'a>(&mut self) {
+    fn prune_by_unused_positionals(&mut self) {
         let mut states_with_unused_positional_count
             = self.candidates.iter()
                 .map(|&candidate_id| {
@@ -399,7 +401,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             return Ok(SelectionResult::Builtin(builtin));
         }
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Pre-selection states ==========");
 
             for state in &self.states {
@@ -421,7 +423,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
 
         self.fail_missing_required_options()?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== After failing missing required options ==========");
 
             for state in &self.states {
@@ -429,14 +431,14 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             }
         }
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Candidate filtering ==========");
             println!("initial candidates: {:?}", self.candidates);
         }
 
         self.prune_unsuccessful_nodes()?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_unsuccessful_nodes: {:?}", self.candidates);
         }
 
@@ -457,19 +459,19 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
 
         self.prune_by_hydration_results(unsuccessful_hydrations)?;
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_hydration_results: {:?}", self.candidates);
         }
 
         self.prune_by_greediness();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_greediness: {:?}", self.candidates);
         }
 
         self.prune_by_unused_positionals();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("after prune_by_empty_positional_values: {:?}", self.candidates);
         }
 
@@ -491,7 +493,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
         let index
             = owned_candidates.first().unwrap();
 
-        if std::env::var("CLIPANION_DEBUG").is_ok() {
+        if is_debug_enabled() {
             println!("========== Selected state ==========");
             println!("{:?}", self.states[*index]);
         }

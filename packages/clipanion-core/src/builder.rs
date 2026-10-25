@@ -1,8 +1,8 @@
-use std::{fmt::Display, iter::once, ops::Range};
+use std::{borrow::Cow, fmt::Display, iter::once, ops::Range};
 
 use itertools::Itertools;
 
-use crate::{machine, runner::{self, DeriveState, RunnerState, ValidateTransition}, shared::{Arg, ArgKey, UserArg, ERROR_NODE_ID, INITIAL_NODE_ID, SUCCESS_NODE_ID}, CommandUsageResult, Error, Selector};
+use crate::{machine, node::NodeOptions, options::{self, OptionUse, PendingValues}, runner::Runner, shared::{Arg, ArgKey, UserArg, INITIAL_NODE_ID, SUCCESS_NODE_ID}, CommandUsageResult, Error, Selector};
 
 #[cfg(test)]
 use crate::SelectionResult;
@@ -38,22 +38,39 @@ pub struct Info {
     pub colorized: bool,
 }
 
+/// The text of a spec. The derive macros borrow it from the binary, so that a
+/// program's specs are built without allocating; specs built at runtime own it
+/// (`String::into`).
+pub type Str = Cow<'static, str>;
+
+/// A list in a spec: borrowed from the binary by the derive macros, owned by the
+/// specs built at runtime (`Vec::into`).
+pub type List<T> = Cow<'static, [T]>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub struct Documentation {
-    pub description: String,
-    pub details: Option<String>,
+    pub description: Str,
+    pub details: Option<Str>,
 }
 
 impl Documentation {
     pub fn new(description: &str, details: Option<&str>) -> Self {
         Documentation {
-            description: description.to_string(),
-            details: details.map(|details| details.to_string()),
+            description: description.to_string().into(),
+            details: details.map(|details| details.to_string().into()),
         }
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
     }
 }
 
@@ -116,6 +133,10 @@ pub struct State<'args> {
     pub path: Vec<&'args str>,
     pub positional_values: Vec<(usize, Vec<UserArg<'args>>)>,
     pub option_values: Vec<(usize, Vec<UserArg<'args>>)>,
+
+    /// The values the last option waits for, in the next words.
+    pub pending_values: Option<PendingValues>,
+
     pub post_double_dash: bool,
     pub is_help: bool,
 
@@ -132,259 +153,158 @@ impl<'args> State<'args> {
             .map(|(id, values)| (id, values.iter().map(|s| s.value).collect()))
             .collect()
     }
+
+    fn push_token(&mut self, _token: Token) {
+        #[cfg(feature = "tokens")]
+        self.tokens.push(_token);
+    }
+
+    /// Records `--`, or a help flag.
+    pub(crate) fn push_syntax(&mut self, arg: UserArg<'args>) {
+        self.push_token(Token::Syntax {
+            arg_index: arg.index,
+            slice: 0..arg.value.len(),
+        });
+    }
+
+    /// Records an option `arg` sets, with its value when it's in the same word.
+    pub(crate) fn start_option(&mut self, arg: UserArg<'args>, option_use: &OptionUse) {
+        let OptionUse {option_id, name, value} = option_use;
+
+        self.push_token(Token::Option {
+            arg_index: arg.index,
+            slice: name.clone(),
+            component_id: *option_id,
+        });
+
+        let mut values = vec![];
+
+        if let Some((assign, value)) = value {
+            if let Some(assign) = assign {
+                self.push_token(Token::Assign {
+                    arg_index: arg.index,
+                    slice: *assign..*assign + 1,
+                    component_id: *option_id,
+                });
+            }
+
+            self.push_token(Token::Value {
+                arg_index: arg.index,
+                slice: value.clone(),
+                component_id: *option_id,
+            });
+
+            values.push(UserArg {
+                value: &arg.value[value.clone()],
+                index: arg.index,
+            });
+        }
+
+        self.option_values.push((*option_id, values));
+    }
+
+    /// Records a value of the last option.
+    pub(crate) fn push_option_value(&mut self, arg: UserArg<'args>) {
+        let Some((option_id, values)) = self.option_values.last_mut() else {
+            panic!("No option value found");
+        };
+
+        values.push(arg);
+
+        let component_id
+            = *option_id;
+
+        self.push_token(Token::Value {
+            arg_index: arg.index,
+            slice: 0..arg.value.len(),
+            component_id,
+        });
+    }
 }
 
-impl<'args> RunnerState for State<'args> {
-    fn get_context_id(&self) -> usize {
-        self.context_id
-    }
-
-    fn set_context_id(&mut self, context_id: usize) {
-        self.context_id = context_id;
-    }
-
-    fn get_node_id(&self) -> usize {
-        self.node_id
-    }
-
-    fn set_node_id(&mut self, node_id: usize) {
-        self.node_id = node_id;
-    }
-
-    fn get_keyword_count(&self) -> usize {
-        self.keyword_count
-    }
-}
-
+/// What a word must be to take a transition of the machine. Option names aren't
+/// checked here: options aren't transitions (see `options.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Check<'cmds> {
-    IsOption(&'cmds str),
-    IsOptionLike,
-    IsOptionBinding(&'cmds str),
-    IsNotOptionLike,
-    IsBatch(Vec<char>),
+pub enum Check {
+    /// A positional's value: a word that doesn't start with a dash, `-` alone,
+    /// or a negative number that isn't one of the command's options; after
+    /// `--`, any word.
+    IsPositional,
+
+    /// The first word of a proxy: any word that isn't one of the command's
+    /// options (`-h` and `--help` are, with `help`); after `--`, any word.
+    IsProxyStart {help: bool},
 }
 
-impl<'cmds, 'args> ValidateTransition<'args, State<'args>> for Check<'cmds> {
-    fn check(&self, state: &State<'args>, arg: &'args str) -> bool {
+impl Check {
+    pub fn check(&self, spec: &CommandSpec, state: &State, arg: &str) -> bool {
         match self {
-            Check::IsOption(name) => {
-                !state.post_double_dash && arg == *name
+            Check::IsPositional => {
+                state.post_double_dash || options::is_value_word(spec, arg)
             },
 
-            Check::IsOptionBinding(name) => {
-                !state.post_double_dash && arg.starts_with(name) && arg.chars().nth(name.len()) == Some('=')
-            },
-
-            Check::IsOptionLike => {
-                !state.post_double_dash && arg.starts_with("-") && arg != "--"
-            },
-
-            Check::IsNotOptionLike => {
-                state.post_double_dash || !arg.starts_with("-")
-            },
-
-            Check::IsBatch(batch) => {
-                !state.post_double_dash && arg.starts_with("-") && arg.len() > 2 && arg.chars().skip(1).all(|c| batch.contains(&c))
+            Check::IsProxyStart {help} => {
+                state.post_double_dash || !options::is_option_word(spec, arg, *help)
             },
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Attachment {
-    Option,
-    Positional,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reducer {
-    EnableDoubleDash,
-    EnableHelp,
     IncreaseStaticCount,
-    StartValue(Attachment, usize),
-    PushValue(Attachment),
-    BindValue(usize, usize),
-    ResolveBatch(Vec<(char, usize)>),
+    StartPositional(usize),
+    PushPositional,
 }
 
-impl<'args> DeriveState<'args, State<'args>> for Reducer {
-    fn derive(&self, state: &mut State<'args>, _target_id: usize, token: Arg<'args>) -> () {
+impl Reducer {
+    pub fn apply<'args>(&self, state: &mut State<'args>, token: Arg<'args>) {
+        let Arg::User(user_arg) = token else {
+            panic!("Expected user argument");
+        };
+
         match self {
-            Reducer::EnableHelp => {
-                state.is_help = true;
-
-                #[cfg(feature = "tokens")]
-                if let Arg::User(user_arg) = token {
-                    state.tokens.push(Token::Syntax {
-                        arg_index: user_arg.index,
-                        slice: 0..user_arg.value.len(),
-                    });
-                }
-            },
-
-            Reducer::EnableDoubleDash => {
-                state.post_double_dash = true;
-
-                #[cfg(feature = "tokens")]
-                if let Arg::User(user_arg) = token {
-                    state.tokens.push(Token::Syntax {
-                        arg_index: user_arg.index,
-                        slice: 0..user_arg.value.len(),
-                    });
-                }
-            },
-
             Reducer::IncreaseStaticCount => {
                 state.keyword_count += 1;
 
-                #[cfg(feature = "tokens")]
-                if let Arg::User(user_arg) = token {
-                    state.tokens.push(Token::Keyword {
-                        arg_index: user_arg.index,
-                        slice: 0..user_arg.value.len(),
-                    });
-                }
+                state.push_token(Token::Keyword {
+                    arg_index: user_arg.index,
+                    slice: 0..user_arg.value.len(),
+                });
             },
 
-            Reducer::StartValue(attachment, attachment_id) => {
-                match attachment {
-                    Attachment::Option => {
-                        state.option_values.push((*attachment_id, vec![]));
+            Reducer::StartPositional(positional_id) => {
+                state.positional_values.push((*positional_id, vec![user_arg]));
 
-                        let Arg::User(user_arg) = token else {
-                            panic!("Expected user argument");
-                        };
-
-                        #[cfg(feature = "tokens")] {
-                            state.tokens.push(Token::Option {
-                                arg_index: user_arg.index,
-                                slice: 0..user_arg.value.len(),
-                                component_id: *attachment_id,
-                            });
-                        }
-                    },
-
-                    Attachment::Positional => {
-                        let Arg::User(user_arg) = token else {
-                            panic!("Expected user argument");
-                        };
-
-                        state.positional_values.push((*attachment_id, vec![user_arg]));
-
-                        #[cfg(feature = "tokens")] {
-                            state.tokens.push(Token::Positional {
-                                arg_index: user_arg.index,
-                                slice: 0..user_arg.value.len(),
-                                component_id: *attachment_id,
-                            });
-                        }
-                    },
-                }
+                state.push_token(Token::Positional {
+                    arg_index: user_arg.index,
+                    slice: 0..user_arg.value.len(),
+                    component_id: *positional_id,
+                });
             },
 
-            Reducer::PushValue(attachment) => {
-                match attachment {
-                    Attachment::Option => {
-                        let Some((attachment_id, ref mut values)) = state.option_values.last_mut() else {
-                            panic!("No option value found");
-                        };
-
-                        let Arg::User(user_arg) = token else {
-                            panic!("Expected user argument");
-                        };
-
-                        values.push(user_arg);
-
-                        #[cfg(feature = "tokens")] {
-                            state.tokens.push(Token::Value {
-                                arg_index: user_arg.index,
-                                slice: 0..user_arg.value.len(),
-                                component_id: *attachment_id,
-                            });
-                        }
-                    },
-
-                    Attachment::Positional => {
-                        let Some((attachment_id, ref mut values)) = state.positional_values.last_mut() else {
-                            panic!("No positional value found");
-                        };
-
-                        let Arg::User(user_arg) = token else {
-                            panic!("Expected user argument");
-                        };
-
-                        values.push(user_arg);
-
-                        #[cfg(feature = "tokens")] {
-                            state.tokens.push(Token::Positional {
-                                arg_index: user_arg.index,
-                                slice: 0..user_arg.value.len(),
-                                component_id: *attachment_id,
-                            });
-                        }
-                    },
-                }
-            },
-
-            Reducer::BindValue(skip_len, option_id) => {
-                let Arg::User(user_arg) = token else {
-                    panic!("Expected user argument");
+            Reducer::PushPositional => {
+                let Some((positional_id, values)) = state.positional_values.last_mut() else {
+                    panic!("No positional value found");
                 };
 
-                state.option_values.push((*option_id, vec![UserArg {
-                    value: &user_arg.value[*skip_len + 1..],
-                    index: user_arg.index,
-                }]));
+                values.push(user_arg);
 
-                #[cfg(feature = "tokens")] {
-                    state.tokens.push(Token::Option {
-                        arg_index: user_arg.index,
-                        slice: 0..*skip_len,
-                        component_id: *option_id,
-                    });
+                let component_id
+                    = *positional_id;
 
-                    state.tokens.push(Token::Assign {
-                        arg_index: user_arg.index,
-                        slice: *skip_len..*skip_len + 1,
-                        component_id: *option_id,
-                    });
-
-                    state.tokens.push(Token::Value {
-                        arg_index: user_arg.index,
-                        slice: *skip_len + 1..user_arg.value.len(),
-                        component_id: *option_id,
-                    });
-                }
-            },
-
-            Reducer::ResolveBatch(batch) => {
-                let Arg::User(user_arg) = token else {
-                    panic!("Expected user argument");
-                };
-
-                for (batch_index, c) in user_arg.value.chars().enumerate().skip(1) {
-                    let Some((_, option_id)) = batch.iter().find(|(other_c, _)| c == *other_c) else {
-                        continue;
-                    };
-
-                    state.option_values.push((*option_id, vec![]));
-
-                    #[cfg(feature = "tokens")] {
-                        state.tokens.push(Token::Option {
-                            arg_index: user_arg.index,
-                            slice: if batch_index == 0 {0..2} else {batch_index..batch_index + 1},
-                            component_id: *option_id,
-                        });
-                    }
-                }
+                state.push_token(Token::Positional {
+                    arg_index: user_arg.index,
+                    slice: 0..user_arg.value.len(),
+                    component_id,
+                });
             },
         }
     }
 }
 
-type Machine<'cmds>
-    = machine::Machine<'cmds, Option<Check<'cmds>>, Option<Reducer>>;
+pub type CliMachine<'cmds>
+    = machine::Machine<'cmds, Option<Check>, Option<Reducer>>;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -393,11 +313,11 @@ type Machine<'cmds>
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub enum PositionalSpec {
     Keyword {
-        expected: String,
+        expected: Str,
     },
 
     Dynamic {
-        name: String,
+        name: Str,
         documentation: Option<Documentation>,
 
         min_len: usize,
@@ -479,7 +399,7 @@ impl std::fmt::Display for PositionalSpec {
 }
 
 impl PositionalSpec {
-    pub fn keyword<T: Into<String>>(value: T) -> Self {
+    pub fn keyword<T: Into<Str>>(value: T) -> Self {
         PositionalSpec::Keyword {
             expected: value.into(),
         }
@@ -487,7 +407,7 @@ impl PositionalSpec {
 
     pub fn optional() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -502,7 +422,7 @@ impl PositionalSpec {
 
     pub fn required() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -517,7 +437,7 @@ impl PositionalSpec {
 
     pub fn rest() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -532,7 +452,7 @@ impl PositionalSpec {
 
     pub fn proxy() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -552,11 +472,11 @@ impl PositionalSpec {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub struct OptionSpec {
-    pub primary_name: String,
-    pub aliases: Vec<String>,
+    pub primary_name: Str,
+    pub aliases: List<Str>,
 
     pub documentation: Option<Documentation>,
-    pub default_value: Option<String>,
+    pub default_value: Option<Str>,
 
     pub min_len: usize,
     pub extra_len: Option<usize>,
@@ -568,7 +488,7 @@ pub struct OptionSpec {
 }
 
 impl OptionSpec {
-    fn parse_names(name: &str) -> (String, Vec<String>) {
+    fn parse_names(name: &str) -> (Str, List<Str>) {
         let names = name
             .split(',')
             .collect::<Vec<_>>();
@@ -578,10 +498,10 @@ impl OptionSpec {
             .unwrap();
 
         let aliases = aliases.iter()
-            .map(|name| name.to_string())
-            .collect();
+            .map(|name| Cow::Owned(name.to_string()))
+            .collect::<Vec<_>>();
 
-        (primary_name.to_string(), aliases)
+        (Cow::Owned(primary_name.to_string()), aliases.into())
     }
 
     pub fn boolean(name: &str) -> Self {
@@ -626,9 +546,13 @@ impl OptionSpec {
         }
     }
 
+    pub fn primary_name(&self) -> &str {
+        &self.primary_name
+    }
+
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
-        once(self.primary_name.as_str())
-            .chain(self.aliases.iter().map(|alias| alias.as_str()))
+        once(self.primary_name())
+            .chain(self.aliases.iter().map(|alias| &**alias))
     }
 }
 
@@ -640,7 +564,7 @@ impl std::fmt::Display for OptionSpec {
             write!(f, "[{}", self.primary_name)?;
         }
 
-        for alias in &self.aliases {
+        for alias in self.aliases.iter() {
             write!(f, ",{}", alias)?;
         }
 
@@ -694,8 +618,8 @@ impl std::fmt::Display for Component {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export, export_to = "index.ts"))]
 pub struct Example {
-    pub command: String,
-    pub description: String,
+    pub command: Str,
+    pub description: Str,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -704,13 +628,13 @@ pub struct Example {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export, export_to = "index.ts"))]
 pub struct CommandSpec {
-    pub primary_path: Vec<String>,
-    pub aliases: Vec<Vec<String>>,
-    pub category: Option<String>,
+    pub primary_path: List<Str>,
+    pub aliases: List<List<Str>>,
+    pub category: Option<Str>,
     pub documentation: Option<Documentation>,
-    pub examples: Vec<Example>,
-    pub components: Vec<Component>,
-    pub required_options: Vec<usize>,
+    pub examples: List<Example>,
+    pub components: List<Component>,
+    pub required_options: List<usize>,
 }
 
 impl std::fmt::Display for CommandSpec {
@@ -737,202 +661,66 @@ impl CommandSpec {
         self.primary_path.is_empty() || self.aliases.iter().any(|path| path.is_empty())
     }
 
-    pub fn usage(&self) -> CommandUsageResult {
-        CommandUsageResult::new(self.clone())
+    /// The command's paths: its primary path, then its aliases.
+    pub fn paths(&self) -> impl Iterator<Item = &[Str]> {
+        once(&*self.primary_path)
+            .chain(self.aliases.iter().map(|path| &**path))
     }
 
-    pub fn build(&'_ self, command_id: usize) -> Machine<'_> {
-        CommandBuilderContext::new(&self, command_id).build()
+    pub fn usage(&self) -> CommandUsageResult<'_> {
+        CommandUsageResult::new(self)
+    }
+
+    pub fn build(&'_ self, command_id: usize) -> CliMachine<'_> {
+        CommandBuilderContext::new(self, command_id).build()
     }
 }
 
 pub struct CommandBuilderContext<'cmds> {
-    machine: Machine<'cmds>,
+    machine: CliMachine<'cmds>,
     spec: &'cmds CommandSpec,
-    batch_check: Vec<char>,
-    batch_resolve: Vec<(char, usize)>,
-    inhibit_options: usize,
-    proxy_options: usize,
-    has_option_h: bool,
-    has_option_help: bool,
+
+    /// Whether we're building a proxy, which takes every word: no options.
+    proxy: bool,
+
+    /// Whether `-h` and `--help` asked for help where options were last attached.
+    help: bool,
 }
 
 impl<'cmds> CommandBuilderContext<'cmds> {
     fn new(spec: &'cmds CommandSpec, command_id: usize) -> Self {
-        // -v,--verbose => vec!["v"]
-        let batch_check = spec.components.iter()
-            .filter_map(|component| component.is_option())
-            .flat_map(|option| option.all_names())
-            .filter(|name| name.starts_with("-") && !name.starts_with("--"))
-            .flat_map(|name| name.chars().skip(1))
-            .collect::<Vec<_>>();
-
-        // -v,--verbose => vec![("v", 0)]
-        let batch_resolve = spec.components.iter()
-            .enumerate()
-            .filter_map(|(component_id, component)| component.is_option().map(|option| (option, component_id)))
-            .flat_map(|(option, component_id)| option.all_names().map(move |name| (name, component_id)))
-            .filter(|(name, _)| name.starts_with("-") && !name.starts_with("--"))
-            .map(|(name, component_id)| (name.chars().skip(1).next().unwrap(), component_id))
-            .collect::<Vec<_>>();
-
-        let has_option_h = spec.components.iter()
-            .filter_map(|component| component.is_option())
-            .flat_map(|option| option.all_names())
-            .any(|name| name == "-h");
-
-        let has_option_help = spec.components.iter()
-            .filter_map(|component| component.is_option())
-            .flat_map(|option| option.all_names())
-            .any(|name| name == "--help");
-
         CommandBuilderContext {
-            machine: Machine::new(command_id),
+            machine: CliMachine::new(command_id),
             spec,
-            batch_check,
-            batch_resolve,
-            inhibit_options: 0,
-            proxy_options: 0,
-            has_option_h,
-            has_option_help,
+            proxy: false,
+            help: true,
         }
     }
 
-    fn enter_inhibit_options(&mut self) {
-        self.inhibit_options += 1;
-    }
+    /// Lets the command's options be given on `node_id`: the runner reads them
+    /// there, from the command's spec, and stays on the node.
+    fn attach_options(&mut self, node_id: usize, is_followed_by_proxy: bool) -> usize {
+        if !self.proxy {
+            // A proxy that directly follows the command's path takes `-h` and `--help`.
+            self.help = !is_followed_by_proxy;
 
-    fn exit_inhibit_options(&mut self) {
-        self.inhibit_options -= 1;
-    }
-
-    fn enter_proxy_options(&mut self) {
-        self.proxy_options += 1;
-    }
-
-    fn exit_proxy_options(&mut self) {
-        self.proxy_options -= 1;
-    }
-
-    fn get_positional_check(&self) -> Option<Check<'cmds>> {
-        if self.proxy_options > 0 {
-            None
-        } else {
-            Some(Check::IsNotOptionLike)
-        }
-    }
-
-    fn attach_options(&mut self, pre_options_node_id: usize, is_followed_by_proxy: bool) -> usize {
-        if self.inhibit_options > 0 || self.proxy_options > 0 {
-            return pre_options_node_id;
-        }
-
-        let post_options_node_id
-            = self.machine.create_node();
-
-        self.machine.register_shortcut(
-            pre_options_node_id,
-            post_options_node_id,
-        );
-
-        self.machine.register_dynamic(
-            pre_options_node_id,
-            Some(Check::IsOption("--")),
-            pre_options_node_id,
-            Some(Reducer::EnableDoubleDash),
-        );
-
-        self.machine.register_dynamic(
-            pre_options_node_id,
-            Some(Check::IsBatch(self.batch_check.clone())),
-            pre_options_node_id,
-            Some(Reducer::ResolveBatch(self.batch_resolve.clone())),
-        );
-
-        let options = self.spec.components.iter()
-            .enumerate()
-            .filter_map(|(i, component)| match component {
-                Component::Option(option) => Some((i, option)),
-                _ => None,
+            self.machine.nodes[node_id].options = Some(NodeOptions {
+                help: self.help,
             });
-
-        for (option_id, option) in options {
-            let all_names
-                = once(&option.primary_name)
-                    .chain(option.aliases.iter());
-
-            for name in all_names {
-                let mut post_option_node_id
-                    = self.machine.create_node();
-
-                self.machine.register_dynamic(
-                    pre_options_node_id,
-                    Some(Check::IsOption(name)),
-                    post_option_node_id,
-                    Some(Reducer::StartValue(Attachment::Option, option_id)),
-                );
-
-                let accepts_arguments
-                    = option.min_len > 0 || option.extra_len != Some(0);
-
-                if option.allow_boolean && accepts_arguments && option.min_len > 0 {
-                    self.machine.register_shortcut(
-                        post_option_node_id,
-                        pre_options_node_id,
-                    );
-                }
-
-                if accepts_arguments {
-                    self.enter_inhibit_options();
-
-                    post_option_node_id = self.attach_variadic(
-                        post_option_node_id,
-                        option.min_len,
-                        option.extra_len,
-                        Reducer::PushValue(Attachment::Option),
-                        Reducer::PushValue(Attachment::Option),
-                    );
-
-                    self.exit_inhibit_options();
-
-                    if option.min_len + option.extra_len.unwrap_or(0) == 1 {
-                        self.machine.register_dynamic(
-                            pre_options_node_id,
-                            Some(Check::IsOptionBinding(name)),
-                            post_option_node_id,
-                            Some(Reducer::BindValue(name.len(), option_id)),
-                        );
-                    }
-                }
-
-                self.machine.register_shortcut(
-                    post_option_node_id,
-                    pre_options_node_id,
-                );
-            }
         }
 
-        if !is_followed_by_proxy {
-            if !self.has_option_help {
-                self.machine.register_dynamic(
-                    pre_options_node_id,
-                    Some(Check::IsOption("--help")),
-                    ERROR_NODE_ID,
-                    Some(Reducer::EnableHelp),
-                );
-            }
+        node_id
+    }
 
-            if !self.has_option_h {
-                self.machine.register_dynamic(
-                    pre_options_node_id,
-                    Some(Check::IsOption("-h")),
-                    ERROR_NODE_ID,
-                    Some(Reducer::EnableHelp),
-                );
-            }
+    fn positional_check(&self, reducer: &Reducer) -> Option<Check> {
+        match (self.proxy, reducer) {
+            (false, _) => Some(Check::IsPositional),
+
+            // Until a proxy starts, the command's options are read as options.
+            (true, Reducer::StartPositional(_)) => Some(Check::IsProxyStart {help: self.help}),
+
+            (true, _) => None,
         }
-
-        post_options_node_id
     }
 
     fn attach_required(&mut self, pre_node_id: usize, reducer: Reducer) -> usize {
@@ -941,7 +729,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
         self.machine.register_dynamic(
             pre_node_id,
-            self.get_positional_check(),
+            self.positional_check(&reducer),
             next_node_id,
             Some(reducer),
         );
@@ -1042,21 +830,17 @@ impl<'cmds> CommandBuilderContext<'cmds> {
                 },
 
                 PositionalSpec::Dynamic {min_len, extra_len, is_proxy, ..} => {
-                    if *is_proxy {
-                        self.enter_proxy_options();
-                    }
+                    self.proxy = *is_proxy;
 
                     current_node_id = self.attach_variadic(
                         current_node_id,
                         *min_len,
                         *extra_len,
-                        Reducer::StartValue(Attachment::Positional, *id),
-                        Reducer::PushValue(Attachment::Positional),
+                        Reducer::StartPositional(*id),
+                        Reducer::PushPositional,
                     );
 
-                    if *is_proxy {
-                        self.exit_proxy_options();
-                    }
+                    self.proxy = false;
                 },
             }
         }
@@ -1064,7 +848,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
         current_node_id
     }
 
-    fn build(mut self) -> Machine<'cmds> {
+    fn build(mut self) -> CliMachine<'cmds> {
         let first_node_id
             = self.machine.create_node();
 
@@ -1120,7 +904,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
                         self.machine.register_static(
                             current_path_node_id,
-                            ArgKey::User(segment.as_str()),
+                            ArgKey::User(segment),
                             post_segment_node_id,
                             Some(Reducer::IncreaseStaticCount),
                         );
@@ -1170,51 +954,34 @@ impl<'cmds> CliBuilder<'cmds> {
         self
     }
 
-    pub fn compile(&self) -> Machine<'cmds> {
-        let command_machines: Vec<Machine<'cmds>>
+    pub fn compile(&self) -> CliMachine<'cmds> {
+        let command_machines
             = self.commands.iter()
                 .enumerate()
-                .map(|(command_id, &command)| command.build(command_id))
-                .collect::<Vec<_>>();
+                .map(|(command_id, &command)| command.build(command_id));
 
         let mut machine
-            = Machine::new_any_of(command_machines);
+            = CliMachine::new_any_of(command_machines);
 
         machine.simplify_machine();
         machine
     }
 
     pub fn run_partial<'args>(&self, args: &[&'args str]) -> Vec<State<'args>> {
-        fn on_error<'args>(mut state: State<'args>, _: Arg<'args>) -> State<'args> {
-            state.set_node_id(ERROR_NODE_ID);
-            state
-        }
-
         let machine
             = self.compile();
 
-        let states: Vec<State<'args>>
-            = runner::Runner::run_partial(&machine, on_error, args);
-
-        states
+        Runner::run_partial(&machine, &self.commands, args)
     }
 
-    pub fn run<'args>(&self, args: &[&'args str]) -> Result<Selector<'cmds, 'args>, Error<'cmds>> {
-        fn on_error<'args>(mut state: State<'args>, _: Arg<'args>) -> State<'args> {
-            state.set_node_id(ERROR_NODE_ID);
-            state
-        }
-
+    pub fn run<'a, 'args>(&'a self, args: &'a [&'args str]) -> Result<Selector<'a, 'cmds, 'args>, Error<'cmds>> {
         let machine
             = self.compile();
 
-        let states: Vec<State<'args>>
-            = runner::Runner::run(&machine, on_error, args);
+        let states
+            = Runner::run(&machine, &self.commands, args);
 
-        let selector: Selector<'cmds, 'args>
-            = Selector::new(self.commands.clone(), args.to_vec(), states);
-
-        Ok(selector)
+        Ok(Selector::new(&self.commands, args, states))
     }
 }
 
@@ -1255,7 +1022,7 @@ fn it_should_select_the_default_command_when_using_mandatory_positional_argument
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::required()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1284,12 +1051,12 @@ fn it_should_select_commands_by_their_path() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("bar"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("bar"))].into(),
         ..Default::default()
     };
 
@@ -1335,12 +1102,12 @@ fn it_should_favor_paths_over_mandatory_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::required())],
+        components: vec![Component::Positional(PositionalSpec::required())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
@@ -1370,12 +1137,12 @@ fn it_should_favor_paths_over_optional_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional())],
+        components: vec![Component::Positional(PositionalSpec::optional())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
@@ -1412,17 +1179,17 @@ fn it_should_favor_paths_filling_early_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
     let spec3 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
@@ -1456,7 +1223,7 @@ fn it_should_aggregate_positional_values() {
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::required()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1491,7 +1258,7 @@ fn it_should_aggregate_positional_values_with_rest() {
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::rest()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1526,7 +1293,7 @@ fn it_should_parse_batch_options() {
         components: vec![
             Component::Option(OptionSpec::boolean("-V,--verbose")),
             Component::Option(OptionSpec::boolean("-Q,--quiet")),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1548,5 +1315,47 @@ fn it_should_parse_batch_options() {
 
     assert_eq!(state.values(), vec![
         (0, vec![]),
+    ]);
+}
+
+#[cfg(feature = "tokens")]
+#[test]
+fn it_should_tokenize_options_and_their_values() {
+    let mut cli_builder
+        = CliBuilder::new();
+
+    let spec = CommandSpec {
+        components: vec![
+            Component::Option(OptionSpec::boolean("-v,--verbose")),
+            Component::Option(OptionSpec::parametrized("-n,--count")),
+        ].into(),
+        ..Default::default()
+    };
+
+    cli_builder.add_command(&spec);
+
+    let tokens = |args: &[&str]| {
+        let mut states
+            = cli_builder.run_partial(args);
+
+        states.pop().unwrap().tokens
+    };
+
+    assert_eq!(tokens(&["--count=5"]), vec![
+        Token::Option {arg_index: 0, slice: 0..7, component_id: 1},
+        Token::Assign {arg_index: 0, slice: 7..8, component_id: 1},
+        Token::Value {arg_index: 0, slice: 8..9, component_id: 1},
+    ]);
+
+    assert_eq!(tokens(&["-vn5"]), vec![
+        Token::Option {arg_index: 0, slice: 0..2, component_id: 0},
+        Token::Option {arg_index: 0, slice: 2..3, component_id: 1},
+        Token::Value {arg_index: 0, slice: 3..4, component_id: 1},
+    ]);
+
+    assert_eq!(tokens(&["-n", "-5", "--"]), vec![
+        Token::Option {arg_index: 0, slice: 0..2, component_id: 1},
+        Token::Value {arg_index: 1, slice: 0..2, component_id: 1},
+        Token::Syntax {arg_index: 2, slice: 0..2},
     ]);
 }
