@@ -63,7 +63,7 @@ impl<'cmds, 'args> Selector<'cmds, 'args> {
             let missing_required_options
                 = command.required_options.iter()
                     .filter(|&option_id| !state.option_values.iter().any(|(id, _)| id == option_id))
-                    .map(|option_id| self.commands[state.context_id].components[*option_id].is_option().unwrap().primary_name.as_str())
+                    .map(|option_id| self.commands[state.context_id].components[*option_id].is_option().unwrap().primary_name())
                     .collect::<Vec<_>>();
 
             if missing_required_options.len() == 0 {

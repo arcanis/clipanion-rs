@@ -248,7 +248,7 @@ mod tests {
                 Component::Option(OptionSpec::boolean("-a")),
                 Component::Option(OptionSpec::parametrized("-n,--count")),
                 Component::Option(OptionSpec::parametrized("-m,--message")),
-            ],
+            ].into(),
             ..Default::default()
         }
     }
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn it_lets_commands_define_digits() {
         let spec = CommandSpec {
-            components: vec![Component::Option(OptionSpec::boolean("-1"))],
+            components: vec![Component::Option(OptionSpec::boolean("-1"))].into(),
             ..Default::default()
         };
 

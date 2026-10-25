@@ -114,3 +114,44 @@ command specs, for the tools that describe a program
 
 Options can't require one another (an option only valid with another one): check
 those after parsing, in the command.
+
+## Reading the specs
+
+Each command's spec is a `static`, built at compile time: `MyCommand::command_spec()`
+returns a `&'static CommandSpec`, and a program's `registered_commands()` lists
+them. Building them takes no allocation.
+
+Their text is a `Str` (`Cow<'static, str>`), and their lists a `List<T>`
+(`Cow<'static, [T]>`). Both read like the `&str` and slices they deref to:
+
+```rust
+use clipanion::core::{CommandSpec, Component};
+
+fn describe(spec: &CommandSpec) {
+    let path = spec.primary_path.join(" ");
+
+    for option in spec.components.iter().filter_map(Component::is_option) {
+        let name: &str = option.primary_name();
+        let description = option.documentation.as_ref().map(|doc| doc.description());
+        println!("{path} {name}: {}", description.unwrap_or(""));
+    }
+
+    // The primary path, then the aliases.
+    for path in spec.paths() {
+        println!("{}", path.join(" "));
+    }
+}
+```
+
+A `String` comes from `to_string()` (`clone()` gives a `Str`), and an owned
+spec, built at runtime, takes `String`s and `Vec`s with `into()`:
+
+```rust
+use clipanion::core::{CommandSpec, Component, OptionSpec};
+
+let spec = CommandSpec {
+    primary_path: vec!["install".into()].into(),
+    components: vec![Component::Option(OptionSpec::boolean("--frozen"))].into(),
+    ..Default::default()
+};
+```

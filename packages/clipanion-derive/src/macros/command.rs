@@ -42,12 +42,20 @@ fn parse_documentation(value: String) -> proc_macro2::TokenStream {
         let trimmed_details
             = raw_details.trim();
 
-        quote! {Some(#trimmed_details)}
+        quote! {Some(::std::borrow::Cow::Borrowed(#trimmed_details))}
     } else {
         quote! {None}
     };
 
-    quote! {Some(clipanion::core::Documentation::new(#description, #details))}
+    quote! {Some(clipanion::core::Documentation {
+        description: ::std::borrow::Cow::Borrowed(#description),
+        details: #details,
+    })}
+}
+
+/// A list of literals, borrowed: `["a", "b"]` is `Cow::Borrowed(&[Cow::Borrowed("a"), ...])`.
+fn borrowed_strs<T: quote::ToTokens>(items: &[T]) -> proc_macro2::TokenStream {
+    quote! {::std::borrow::Cow::Borrowed(&[#(::std::borrow::Cow::Borrowed(#items)),*])}
 }
 
 pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenStream, syn::Error> {
@@ -58,7 +66,10 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
     let partial_struct_ident
         = Ident::new(&format!("Partial{}", input.ident), Span::call_site());
 
-    let mut builder = vec![];
+    // The command's spec is a static: everything in it is known here, borrowed
+    // from the binary, and takes no allocation to build.
+    let mut components = vec![];
+    let mut required_options = vec![];
     let mut hydraters = vec![];
 
     let mut command_cli_attributes
@@ -69,7 +80,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
 
     let command_category = command_cli_attributes
         .take_unique::<LitStr>("category")?
-        .map_or(quote!{None}, |lit| quote!{Some(#lit.to_string());});
+        .map_or(quote!{None}, |lit| quote!{Some(::std::borrow::Cow::Borrowed(#lit))});
 
     let command_documentation = command_cli_attributes
         .take_unique::<LitStr>("description")?
@@ -116,17 +127,11 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
             .unwrap_or(0);
 
     let primary_path
-        = paths_lits.remove(primary_path_index);
+        = borrowed_strs(&paths_lits.remove(primary_path_index));
 
-    builder.push(quote! {
-        command_spec.primary_path = vec![#(#primary_path.to_string()),*];
-    });
-
-    for path_lits in paths_lits {
-        builder.push(quote! {
-            command_spec.aliases.push(vec![#(#path_lits.to_string()),*]);
-        });
-    }
+    let alias_paths = paths_lits.iter()
+        .map(|path_lits| borrowed_strs(path_lits))
+        .collect::<Vec<_>>();
 
     let mut partial_struct_members
         = vec![];
@@ -254,11 +259,11 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
             let preferred_name_lit
                 = to_lit_str(preferred_name);
 
-            let aliases_lit = option_bag.path
+            let aliases_lit = borrowed_strs(&option_bag.path
                 .iter()
                 .filter(|name| name != &preferred_name)
                 .map(to_lit_str)
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>());
 
             let min_len_lit = quote! {#min_len};
             let extra_len_lit = match extra_len {
@@ -331,7 +336,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
             let default_value_lit = match &default_value {
                 Some(expr) => {
                     let expr_str = quote!{#expr}.to_string();
-                    quote!{Some(#expr_str.to_string())}
+                    quote!{Some(::std::borrow::Cow::Borrowed(#expr_str))}
                 },
 
                 None => {
@@ -393,14 +398,14 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                 });
             }
 
-            builder.push(quote! {
-                if #is_required {
-                    command_spec.required_options.push(command_spec.components.len());
-                }
+            if is_required {
+                required_options.push(components.len());
+            }
 
-                command_spec.components.push(clipanion::core::Component::Option(clipanion::core::OptionSpec {
-                    primary_name: #preferred_name_lit.to_string(),
-                    aliases: vec![#(#aliases_lit.to_string()),*],
+            components.push(quote! {
+                clipanion::core::Component::Option(clipanion::core::OptionSpec {
+                    primary_name: ::std::borrow::Cow::Borrowed(#preferred_name_lit),
+                    aliases: #aliases_lit,
                     documentation: #documentation,
                     default_value: #default_value_lit,
                     is_hidden: false,
@@ -409,7 +414,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     allow_boolean: #is_option2_type,
                     min_len: #min_len_lit,
                     extra_len: #extra_len_lit,
-                }));
+                })
             });
 
             if !is_required {
@@ -439,10 +444,10 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                         }
                     }
 
-                    builder.push(quote! {
-                        command_spec.components.push(clipanion::core::Component::Option(clipanion::core::OptionSpec {
-                            primary_name: #no_option_name_lit.to_string(),
-                            aliases: vec![],
+                    components.push(quote! {
+                        clipanion::core::Component::Option(clipanion::core::OptionSpec {
+                            primary_name: ::std::borrow::Cow::Borrowed(#no_option_name_lit),
+                            aliases: ::std::borrow::Cow::Borrowed(&[]),
                             documentation: None,
                             default_value: None,
                             is_hidden: true,
@@ -451,7 +456,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                             allow_boolean: false,
                             min_len: 0,
                             extra_len: Some(0),
-                        }));
+                        })
                     });
                 }
             }
@@ -511,16 +516,16 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     None => quote! { None },
                 };
 
-                builder.push(quote! {
-                    command_spec.components.push(clipanion::core::Component::Positional(clipanion::core::PositionalSpec::Dynamic {
-                        name: #field_name_upper.to_string(),
+                components.push(quote! {
+                    clipanion::core::Component::Positional(clipanion::core::PositionalSpec::Dynamic {
+                        name: ::std::borrow::Cow::Borrowed(#field_name_upper),
                         documentation: #documentation,
                         min_len: #min_len,
                         extra_len: None,
                         is_prefix: #is_prefix,
                         is_proxy: #is_proxy,
                         completer: #completer_expr,
-                    }));
+                    })
                 });
             } else {
                 partial_struct_members.push(quote! {
@@ -569,16 +574,16 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     None => quote! { None },
                 };
 
-                builder.push(quote! {
-                    command_spec.components.push(clipanion::core::Component::Positional(clipanion::core::PositionalSpec::Dynamic {
-                        name: #field_name_upper.to_string(),
+                components.push(quote! {
+                    clipanion::core::Component::Positional(clipanion::core::PositionalSpec::Dynamic {
+                        name: ::std::borrow::Cow::Borrowed(#field_name_upper),
                         documentation: #documentation,
                         min_len: #min_len,
                         extra_len: #extra_len,
                         is_prefix: #is_prefix,
                         is_proxy: false,
                         completer: #completer_expr,
-                    }));
+                    })
                 });
             }
 
@@ -637,22 +642,17 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
             }
 
             fn command_spec() -> Result<&'static clipanion::core::CommandSpec, clipanion::core::BuildError> {
-                use std::ops::Deref;
-                use std::sync::LazyLock;
+                static COMMAND_SPEC: clipanion::core::CommandSpec = clipanion::core::CommandSpec {
+                    primary_path: #primary_path,
+                    aliases: ::std::borrow::Cow::Borrowed(&[#(#alias_paths),*]),
+                    category: #command_category,
+                    documentation: #command_documentation,
+                    examples: ::std::borrow::Cow::Borrowed(&[]),
+                    components: ::std::borrow::Cow::Borrowed(&[#(#components),*]),
+                    required_options: ::std::borrow::Cow::Borrowed(&[#(#required_options),*]),
+                };
 
-                static COMMAND_SPEC: LazyLock<Result<clipanion::core::CommandSpec, clipanion::core::BuildError>> = LazyLock::new(|| {
-                    let mut command_spec
-                        = clipanion::core::CommandSpec::default();
-
-                    command_spec.category = #command_category;
-                    command_spec.documentation = #command_documentation;
-
-                    #(#builder)*
-
-                    Ok(command_spec)
-                });
-
-                COMMAND_SPEC.deref().as_ref().map_err(|e| e.clone())
+                Ok(&COMMAND_SPEC)
             }
 
             fn hydrate_from_state(environment: &clipanion::advanced::Environment, state: &clipanion::core::State) -> Result<Self::Partial, clipanion::core::CommandError> {

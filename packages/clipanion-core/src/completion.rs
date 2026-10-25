@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    builder::{CliMachine, CommandSpec, Component, PositionalSpec, Reducer},
+    builder::{CliMachine, CommandSpec, Component, PositionalSpec, Reducer, Str},
     runner::Runner,
     shared::{ArgKey, ERROR_NODE_ID},
 };
@@ -134,9 +134,9 @@ pub fn compute_completions<'cmds, 'args>(
                         let idx
                             = state.keyword_count;
 
-                        let is_last_segment = |path: &[String]| {
+                        let is_last_segment = |path: &[Str]| {
                             idx + 1 == path.len()
-                                && path.get(idx).map_or(false, |s| s.as_str() == *keyword)
+                                && path.get(idx).map_or(false, |s| s == keyword)
                         };
 
                         if is_last_segment(&cmd.primary_path)
@@ -519,28 +519,28 @@ mod tests {
     fn create_simple_cli() -> Vec<CommandSpec> {
         vec![
             CommandSpec {
-                primary_path: vec!["add".to_string()],
+                primary_path: vec!["add".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("-v,--verbose")),
                     Component::Option(OptionSpec::parametrized("-m,--message")),
                     Component::Positional(PositionalSpec::rest()),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["commit".to_string()],
+                primary_path: vec!["commit".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("-a,--all")),
                     Component::Option(OptionSpec::parametrized("-m,--message")),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["checkout".to_string()],
+                primary_path: vec!["checkout".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("-b")),
                     Component::Positional(PositionalSpec::optional()),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ]
@@ -772,27 +772,27 @@ mod tests {
     fn test_keyword_completions_include_command_description() {
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["add".to_string()],
+                primary_path: vec!["add".into()].into(),
                 documentation: Some(Documentation::new("Add files to staging", None)),
-                components: vec![],
+                components: vec![].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["commit".to_string()],
+                primary_path: vec!["commit".into()].into(),
                 documentation: Some(Documentation::new("Record changes", None)),
-                components: vec![],
+                components: vec![].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "run".to_string()],
+                primary_path: vec!["workspace".into(), "run".into()].into(),
                 documentation: Some(Documentation::new("Run a workspace script", None)),
-                components: vec![],
+                components: vec![].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "list".to_string()],
+                primary_path: vec!["workspace".into(), "list".into()].into(),
                 documentation: Some(Documentation::new("List workspaces", None)),
-                components: vec![],
+                components: vec![].into(),
                 ..Default::default()
             },
         ];
@@ -854,17 +854,17 @@ mod tests {
         // B's --verbose should NOT be suggested.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["workspace".to_string()],
+                primary_path: vec!["workspace".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--json")),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "run".to_string()],
+                primary_path: vec!["workspace".into(), "run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -913,11 +913,11 @@ mod tests {
         // primary path is fully typed.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "list".to_string()],
-                aliases: vec![vec!["workspaces".to_string()]],
+                primary_path: vec!["workspace".into(), "list".into()].into(),
+                aliases: vec![vec!["workspaces".into()].into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--json")),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1019,10 +1019,10 @@ mod tests {
     fn test_positional_completer() {
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["checkout".to_string()],
+                primary_path: vec!["checkout".into()].into(),
                 components: vec![
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "BRANCH".to_string(),
+                        name: "BRANCH".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: Some(0),
@@ -1030,7 +1030,7 @@ mod tests {
                         is_proxy: false,
                         completer: Some(branch_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1080,10 +1080,10 @@ mod tests {
         // Positionals without a completer should produce no positional completions
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["checkout".to_string()],
+                primary_path: vec!["checkout".into()].into(),
                 components: vec![
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "BRANCH".to_string(),
+                        name: "BRANCH".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: Some(0),
@@ -1091,7 +1091,7 @@ mod tests {
                         is_proxy: false,
                         completer: None,
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1134,10 +1134,10 @@ mod tests {
         // Its completer should still be invoked.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "SCRIPT".to_string(),
+                        name: "SCRIPT".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1145,7 +1145,7 @@ mod tests {
                         is_proxy: true,
                         completer: Some(script_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1217,11 +1217,11 @@ mod tests {
     fn test_proxy_completer_receives_local_context() {
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1229,7 +1229,7 @@ mod tests {
                         is_proxy: true,
                         completer: Some(echo_context_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1305,13 +1305,13 @@ mod tests {
         // The proxy completer should only see its own args, not the keyword.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Positional(PositionalSpec::Keyword {
-                        expected: "scripts".to_string(),
+                        expected: "scripts".into(),
                     }),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1319,7 +1319,7 @@ mod tests {
                         is_proxy: true,
                         completer: Some(echo_context_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1369,11 +1369,11 @@ mod tests {
         // In particular, options from the command should not leak through.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1381,7 +1381,7 @@ mod tests {
                         is_proxy: true,
                         completer: None,
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1423,10 +1423,10 @@ mod tests {
 
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1434,15 +1434,15 @@ mod tests {
                         is_proxy: true,
                         completer: Some(run_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["build".to_string()],
+                primary_path: vec!["build".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--release")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "TARGET".to_string(),
+                        name: "TARGET".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: Some(0),
@@ -1450,7 +1450,7 @@ mod tests {
                         is_proxy: false,
                         completer: Some(branch_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1488,12 +1488,12 @@ mod tests {
         // `run --<TAB>` should still suggest --verbose since no proxy arg consumed yet
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
                     Component::Option(OptionSpec::parametrized("--output")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1501,7 +1501,7 @@ mod tests {
                         is_proxy: true,
                         completer: Some(script_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1537,11 +1537,11 @@ mod tests {
         // to the proxy completer rather than being treated as CLI options.
         let specs = vec![
             CommandSpec {
-                primary_path: vec!["run".to_string()],
+                primary_path: vec!["run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1549,7 +1549,7 @@ mod tests {
                         is_proxy: true,
                         completer: Some(echo_context_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];
@@ -1594,25 +1594,25 @@ mod tests {
         fn inner_cli_specs() -> Vec<CommandSpec> {
             vec![
                 CommandSpec {
-                    primary_path: vec!["install".to_string()],
+                    primary_path: vec!["install".into()].into(),
                     components: vec![
                         Component::Option(OptionSpec::boolean("--frozen")),
-                    ],
+                    ].into(),
                     ..Default::default()
                 },
                 CommandSpec {
-                    primary_path: vec!["publish".to_string()],
+                    primary_path: vec!["publish".into()].into(),
                     components: vec![
                         Component::Option(OptionSpec::boolean("--dry-run")),
                         Component::Option(OptionSpec::parametrized("--tag")),
-                    ],
+                    ].into(),
                     ..Default::default()
                 },
                 CommandSpec {
-                    primary_path: vec!["test".to_string()],
+                    primary_path: vec!["test".into()].into(),
                     components: vec![
                         Component::Option(OptionSpec::boolean("--watch")),
-                    ],
+                    ].into(),
                     ..Default::default()
                 },
             ]
@@ -1649,11 +1649,11 @@ mod tests {
         //   - `deploy <target>` (a top-level non-proxy command)
         let outer_specs = vec![
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "run".to_string()],
+                primary_path: vec!["workspace".into(), "run".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--verbose")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "ARGS".to_string(),
+                        name: "ARGS".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: None,
@@ -1661,22 +1661,22 @@ mod tests {
                         is_proxy: true,
                         completer: Some(delegate_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["workspace".to_string(), "list".to_string()],
+                primary_path: vec!["workspace".into(), "list".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--json")),
-                ],
+                ].into(),
                 ..Default::default()
             },
             CommandSpec {
-                primary_path: vec!["deploy".to_string()],
+                primary_path: vec!["deploy".into()].into(),
                 components: vec![
                     Component::Option(OptionSpec::boolean("--force")),
                     Component::Positional(PositionalSpec::Dynamic {
-                        name: "TARGET".to_string(),
+                        name: "TARGET".into(),
                         documentation: None,
                         min_len: 1,
                         extra_len: Some(0),
@@ -1684,7 +1684,7 @@ mod tests {
                         is_proxy: false,
                         completer: Some(branch_completer),
                     }),
-                ],
+                ].into(),
                 ..Default::default()
             },
         ];

@@ -1,4 +1,4 @@
-use std::{fmt::Display, iter::once, ops::Range};
+use std::{borrow::Cow, fmt::Display, iter::once, ops::Range};
 
 use itertools::Itertools;
 
@@ -38,22 +38,39 @@ pub struct Info {
     pub colorized: bool,
 }
 
+/// The text of a spec. The derive macros borrow it from the binary, so that a
+/// program's specs are built without allocating; specs built at runtime own it
+/// (`String::into`).
+pub type Str = Cow<'static, str>;
+
+/// A list in a spec: borrowed from the binary by the derive macros, owned by the
+/// specs built at runtime (`Vec::into`).
+pub type List<T> = Cow<'static, [T]>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub struct Documentation {
-    pub description: String,
-    pub details: Option<String>,
+    pub description: Str,
+    pub details: Option<Str>,
 }
 
 impl Documentation {
     pub fn new(description: &str, details: Option<&str>) -> Self {
         Documentation {
-            description: description.to_string(),
-            details: details.map(|details| details.to_string()),
+            description: description.to_string().into(),
+            details: details.map(|details| details.to_string().into()),
         }
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
     }
 }
 
@@ -296,11 +313,11 @@ pub type CliMachine<'cmds>
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub enum PositionalSpec {
     Keyword {
-        expected: String,
+        expected: Str,
     },
 
     Dynamic {
-        name: String,
+        name: Str,
         documentation: Option<Documentation>,
 
         min_len: usize,
@@ -382,7 +399,7 @@ impl std::fmt::Display for PositionalSpec {
 }
 
 impl PositionalSpec {
-    pub fn keyword<T: Into<String>>(value: T) -> Self {
+    pub fn keyword<T: Into<Str>>(value: T) -> Self {
         PositionalSpec::Keyword {
             expected: value.into(),
         }
@@ -390,7 +407,7 @@ impl PositionalSpec {
 
     pub fn optional() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -405,7 +422,7 @@ impl PositionalSpec {
 
     pub fn required() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -420,7 +437,7 @@ impl PositionalSpec {
 
     pub fn rest() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -435,7 +452,7 @@ impl PositionalSpec {
 
     pub fn proxy() -> Self {
         PositionalSpec::Dynamic {
-            name: "".to_string(),
+            name: Cow::Borrowed(""),
 
             documentation: None,
 
@@ -455,11 +472,11 @@ impl PositionalSpec {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export_to = "index.ts"))]
 pub struct OptionSpec {
-    pub primary_name: String,
-    pub aliases: Vec<String>,
+    pub primary_name: Str,
+    pub aliases: List<Str>,
 
     pub documentation: Option<Documentation>,
-    pub default_value: Option<String>,
+    pub default_value: Option<Str>,
 
     pub min_len: usize,
     pub extra_len: Option<usize>,
@@ -471,7 +488,7 @@ pub struct OptionSpec {
 }
 
 impl OptionSpec {
-    fn parse_names(name: &str) -> (String, Vec<String>) {
+    fn parse_names(name: &str) -> (Str, List<Str>) {
         let names = name
             .split(',')
             .collect::<Vec<_>>();
@@ -481,10 +498,10 @@ impl OptionSpec {
             .unwrap();
 
         let aliases = aliases.iter()
-            .map(|name| name.to_string())
-            .collect();
+            .map(|name| Cow::Owned(name.to_string()))
+            .collect::<Vec<_>>();
 
-        (primary_name.to_string(), aliases)
+        (Cow::Owned(primary_name.to_string()), aliases.into())
     }
 
     pub fn boolean(name: &str) -> Self {
@@ -529,9 +546,13 @@ impl OptionSpec {
         }
     }
 
+    pub fn primary_name(&self) -> &str {
+        &self.primary_name
+    }
+
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
-        once(self.primary_name.as_str())
-            .chain(self.aliases.iter().map(|alias| alias.as_str()))
+        once(self.primary_name())
+            .chain(self.aliases.iter().map(|alias| &**alias))
     }
 }
 
@@ -543,7 +564,7 @@ impl std::fmt::Display for OptionSpec {
             write!(f, "[{}", self.primary_name)?;
         }
 
-        for alias in &self.aliases {
+        for alias in self.aliases.iter() {
             write!(f, ",{}", alias)?;
         }
 
@@ -597,8 +618,8 @@ impl std::fmt::Display for Component {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export, export_to = "index.ts"))]
 pub struct Example {
-    pub command: String,
-    pub description: String,
+    pub command: Str,
+    pub description: Str,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -607,13 +628,13 @@ pub struct Example {
 #[cfg_attr(feature = "serde", derive(ts_rs::TS))]
 #[cfg_attr(feature = "serde", ts(export, export_to = "index.ts"))]
 pub struct CommandSpec {
-    pub primary_path: Vec<String>,
-    pub aliases: Vec<Vec<String>>,
-    pub category: Option<String>,
+    pub primary_path: List<Str>,
+    pub aliases: List<List<Str>>,
+    pub category: Option<Str>,
     pub documentation: Option<Documentation>,
-    pub examples: Vec<Example>,
-    pub components: Vec<Component>,
-    pub required_options: Vec<usize>,
+    pub examples: List<Example>,
+    pub components: List<Component>,
+    pub required_options: List<usize>,
 }
 
 impl std::fmt::Display for CommandSpec {
@@ -640,12 +661,18 @@ impl CommandSpec {
         self.primary_path.is_empty() || self.aliases.iter().any(|path| path.is_empty())
     }
 
+    /// The command's paths: its primary path, then its aliases.
+    pub fn paths(&self) -> impl Iterator<Item = &[Str]> {
+        once(&*self.primary_path)
+            .chain(self.aliases.iter().map(|path| &**path))
+    }
+
     pub fn usage(&self) -> CommandUsageResult {
         CommandUsageResult::new(self.clone())
     }
 
     pub fn build(&'_ self, command_id: usize) -> CliMachine<'_> {
-        CommandBuilderContext::new(&self, command_id).build()
+        CommandBuilderContext::new(self, command_id).build()
     }
 }
 
@@ -877,7 +904,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
                         self.machine.register_static(
                             current_path_node_id,
-                            ArgKey::User(segment.as_str()),
+                            ArgKey::User(segment),
                             post_segment_node_id,
                             Some(Reducer::IncreaseStaticCount),
                         );
@@ -998,7 +1025,7 @@ fn it_should_select_the_default_command_when_using_mandatory_positional_argument
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::required()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1027,12 +1054,12 @@ fn it_should_select_commands_by_their_path() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("bar"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("bar"))].into(),
         ..Default::default()
     };
 
@@ -1078,12 +1105,12 @@ fn it_should_favor_paths_over_mandatory_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::required())],
+        components: vec![Component::Positional(PositionalSpec::required())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
@@ -1113,12 +1140,12 @@ fn it_should_favor_paths_over_optional_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional())],
+        components: vec![Component::Positional(PositionalSpec::optional())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::keyword("foo"))],
+        components: vec![Component::Positional(PositionalSpec::keyword("foo"))].into(),
         ..Default::default()
     };
 
@@ -1155,17 +1182,17 @@ fn it_should_favor_paths_filling_early_positional_arguments() {
         = CliBuilder::new();
 
     let spec1 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
     let spec2 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::optional()), Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
     let spec3 = CommandSpec {
-        components: vec![Component::Positional(PositionalSpec::rest())],
+        components: vec![Component::Positional(PositionalSpec::rest())].into(),
         ..Default::default()
     };
 
@@ -1199,7 +1226,7 @@ fn it_should_aggregate_positional_values() {
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::required()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1234,7 +1261,7 @@ fn it_should_aggregate_positional_values_with_rest() {
         components: vec![
             Component::Positional(PositionalSpec::required()),
             Component::Positional(PositionalSpec::rest()),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1269,7 +1296,7 @@ fn it_should_parse_batch_options() {
         components: vec![
             Component::Option(OptionSpec::boolean("-V,--verbose")),
             Component::Option(OptionSpec::boolean("-Q,--quiet")),
-        ],
+        ].into(),
         ..Default::default()
     };
 
@@ -1304,7 +1331,7 @@ fn it_should_tokenize_options_and_their_values() {
         components: vec![
             Component::Option(OptionSpec::boolean("-v,--verbose")),
             Component::Option(OptionSpec::parametrized("-n,--count")),
-        ],
+        ].into(),
         ..Default::default()
     };
 
