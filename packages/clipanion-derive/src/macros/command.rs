@@ -637,7 +637,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
         impl clipanion::details::CommandController for #struct_name {
             type Partial = #partial_struct_ident;
 
-            fn command_usage(opts: clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult, clipanion::core::BuildError> {
+            fn command_usage(opts: clipanion::core::CommandUsageOptions) -> Result<clipanion::core::CommandUsageResult<'static>, clipanion::core::BuildError> {
                 Ok(#struct_name::command_spec()?.usage())
             }
 

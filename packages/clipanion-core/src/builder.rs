@@ -667,8 +667,8 @@ impl CommandSpec {
             .chain(self.aliases.iter().map(|path| &**path))
     }
 
-    pub fn usage(&self) -> CommandUsageResult {
-        CommandUsageResult::new(self.clone())
+    pub fn usage(&self) -> CommandUsageResult<'_> {
+        CommandUsageResult::new(self)
     }
 
     pub fn build(&'_ self, command_id: usize) -> CliMachine<'_> {
@@ -974,17 +974,14 @@ impl<'cmds> CliBuilder<'cmds> {
         Runner::run_partial(&machine, &self.commands, args)
     }
 
-    pub fn run<'args>(&self, args: &[&'args str]) -> Result<Selector<'cmds, 'args>, Error<'cmds>> {
+    pub fn run<'a, 'args>(&'a self, args: &'a [&'args str]) -> Result<Selector<'a, 'cmds, 'args>, Error<'cmds>> {
         let machine
             = self.compile();
 
         let states
             = Runner::run(&machine, &self.commands, args);
 
-        let selector: Selector<'cmds, 'args>
-            = Selector::new(self.commands.clone(), args.to_vec(), states);
-
-        Ok(selector)
+        Ok(Selector::new(&self.commands, args, states))
     }
 }
 
