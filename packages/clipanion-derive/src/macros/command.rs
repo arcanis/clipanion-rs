@@ -478,6 +478,14 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                 .to_uppercase();
 
             if is_vec_type {
+                // How many values the list needs (`#[cli::positional(min_len = 1)]`).
+                let min_len = positional_bag.take("min_len")
+                    .map(expect_lit!(Lit::Int))
+                    .transpose()?
+                    .map(|lit| lit.base10_parse::<usize>())
+                    .transpose()?
+                    .unwrap_or(0);
+
                 partial_struct_members.push(quote! {
                     pub #field_ident: Vec<#internal_field_type>,
                 });
@@ -507,7 +515,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     command_spec.components.push(clipanion::core::Component::Positional(clipanion::core::PositionalSpec::Dynamic {
                         name: #field_name_upper.to_string(),
                         documentation: #documentation,
-                        min_len: 0,
+                        min_len: #min_len,
                         extra_len: None,
                         is_prefix: #is_prefix,
                         is_proxy: #is_proxy,
