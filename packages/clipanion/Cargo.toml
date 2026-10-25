@@ -18,3 +18,7 @@ default = []
 anyhow = ["dep:anyhow"]
 serde = ["clipanion-core/serde", "dep:serde_json"]
 tokens = ["clipanion-core/tokens", "serde"]
+
+[[bench]]
+name = "startup"
+harness = false
