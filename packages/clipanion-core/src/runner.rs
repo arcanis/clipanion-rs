@@ -269,7 +269,10 @@ impl<'machine, 'cmds, 'args> Runner<'machine, 'cmds, 'args> {
 
     /// Gives a value to the option the state waits for.
     fn feed_value(&mut self, mut state: State<'args>, mut pending: PendingValues, arg: UserArg<'args>) {
-        if !options::accepts_value(arg.value) {
+        let spec
+            = self.commands[state.context_id];
+
+        if !options::accepts_value(spec, &pending, arg.value) {
             return self.fail(state);
         }
 

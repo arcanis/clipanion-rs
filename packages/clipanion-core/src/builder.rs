@@ -2,7 +2,7 @@ use std::{fmt::Display, iter::once, ops::Range};
 
 use itertools::Itertools;
 
-use crate::{machine, node::NodeOptions, options::{OptionUse, PendingValues}, runner::Runner, shared::{Arg, ArgKey, UserArg, INITIAL_NODE_ID, SUCCESS_NODE_ID}, CommandUsageResult, Error, Selector};
+use crate::{machine, node::NodeOptions, options::{self, OptionUse, PendingValues}, runner::Runner, shared::{Arg, ArgKey, UserArg, INITIAL_NODE_ID, SUCCESS_NODE_ID}, CommandUsageResult, Error, Selector};
 
 #[cfg(test)]
 use crate::SelectionResult;
@@ -209,15 +209,25 @@ impl<'args> State<'args> {
 /// checked here: options aren't transitions (see `options.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Check {
-    /// A word that doesn't start with a dash; after `--`, any word.
-    IsNotOptionLike,
+    /// A positional's value: a word that doesn't start with a dash, `-` alone,
+    /// or a negative number that isn't one of the command's options; after
+    /// `--`, any word.
+    IsPositional,
+
+    /// The first word of a proxy: any word that isn't one of the command's
+    /// options (`-h` and `--help` are, with `help`); after `--`, any word.
+    IsProxyStart {help: bool},
 }
 
 impl Check {
-    pub fn check(&self, _spec: &CommandSpec, state: &State, arg: &str) -> bool {
+    pub fn check(&self, spec: &CommandSpec, state: &State, arg: &str) -> bool {
         match self {
-            Check::IsNotOptionLike => {
-                state.post_double_dash || !arg.starts_with('-')
+            Check::IsPositional => {
+                state.post_double_dash || options::is_value_word(spec, arg)
+            },
+
+            Check::IsProxyStart {help} => {
+                state.post_double_dash || !options::is_option_word(spec, arg, *help)
             },
         }
     }
@@ -645,6 +655,9 @@ pub struct CommandBuilderContext<'cmds> {
 
     /// Whether we're building a proxy, which takes every word: no options.
     proxy: bool,
+
+    /// Whether `-h` and `--help` asked for help where options were last attached.
+    help: bool,
 }
 
 impl<'cmds> CommandBuilderContext<'cmds> {
@@ -653,6 +666,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             machine: CliMachine::new(command_id),
             spec,
             proxy: false,
+            help: true,
         }
     }
 
@@ -661,18 +675,24 @@ impl<'cmds> CommandBuilderContext<'cmds> {
     fn attach_options(&mut self, node_id: usize, is_followed_by_proxy: bool) -> usize {
         if !self.proxy {
             // A proxy that directly follows the command's path takes `-h` and `--help`.
+            self.help = !is_followed_by_proxy;
+
             self.machine.nodes[node_id].options = Some(NodeOptions {
-                help: !is_followed_by_proxy,
+                help: self.help,
             });
         }
 
         node_id
     }
 
-    fn positional_check(&self) -> Option<Check> {
-        match self.proxy {
-            true => None,
-            false => Some(Check::IsNotOptionLike),
+    fn positional_check(&self, reducer: &Reducer) -> Option<Check> {
+        match (self.proxy, reducer) {
+            (false, _) => Some(Check::IsPositional),
+
+            // Until a proxy starts, the command's options are read as options.
+            (true, Reducer::StartPositional(_)) => Some(Check::IsProxyStart {help: self.help}),
+
+            (true, _) => None,
         }
     }
 
@@ -682,7 +702,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
         self.machine.register_dynamic(
             pre_node_id,
-            self.positional_check(),
+            self.positional_check(&reducer),
             next_node_id,
             Some(reducer),
         );
@@ -1271,5 +1291,47 @@ fn it_should_parse_batch_options() {
 
     assert_eq!(state.values(), vec![
         (0, vec![]),
+    ]);
+}
+
+#[cfg(feature = "tokens")]
+#[test]
+fn it_should_tokenize_options_and_their_values() {
+    let mut cli_builder
+        = CliBuilder::new();
+
+    let spec = CommandSpec {
+        components: vec![
+            Component::Option(OptionSpec::boolean("-v,--verbose")),
+            Component::Option(OptionSpec::parametrized("-n,--count")),
+        ],
+        ..Default::default()
+    };
+
+    cli_builder.add_command(&spec);
+
+    let tokens = |args: &[&str]| {
+        let mut states
+            = cli_builder.run_partial(args);
+
+        states.pop().unwrap().tokens
+    };
+
+    assert_eq!(tokens(&["--count=5"]), vec![
+        Token::Option {arg_index: 0, slice: 0..7, component_id: 1},
+        Token::Assign {arg_index: 0, slice: 7..8, component_id: 1},
+        Token::Value {arg_index: 0, slice: 8..9, component_id: 1},
+    ]);
+
+    assert_eq!(tokens(&["-vn5"]), vec![
+        Token::Option {arg_index: 0, slice: 0..2, component_id: 0},
+        Token::Option {arg_index: 0, slice: 2..3, component_id: 1},
+        Token::Value {arg_index: 0, slice: 3..4, component_id: 1},
+    ]);
+
+    assert_eq!(tokens(&["-n", "-5", "--"]), vec![
+        Token::Option {arg_index: 0, slice: 0..2, component_id: 1},
+        Token::Value {arg_index: 1, slice: 0..2, component_id: 1},
+        Token::Syntax {arg_index: 2, slice: 0..2},
     ]);
 }
