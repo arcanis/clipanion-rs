@@ -10,7 +10,11 @@ const pages = await getCollection(`docs`);
     <meta charset="UTF-8">
   </head>
   <body class={`bg-stone-100 flex gap-8 p-8 min-h-screen`}>
-    <nav class={`bg-white border-stone-200 border rounded-sm p-8 flex-none w-64`}>
+    <nav class={`bg-white border-stone-200 border rounded-sm p-8 flex-none w-64 space-y-4`}>
+      <ul>
+        <li><a href={`/options`}>Options and positionals</a></li>
+        <li><a href={`/parsing`}>How the command line is read</a></li>
+      </ul>
       <ul>
         {pages.map(page => (
           <li><a href={`/${page.id}`}>{page.data.sidebar.label}</a></li>
