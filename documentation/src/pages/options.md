@@ -59,7 +59,10 @@ A list option takes one value at each use by default; `min_len = N` asks for
 
 With `#[cli::command(proxy)]`, the command's list positional is a *proxy*: it
 takes the words that follow it as they are, options included, to forward them to
-another program (see [how the command line is read](/parsing)).
+another program. With `#[cli::command(proxy_program)]` instead, it's a proxy to a
+program: it only starts at a word that isn't option-like, so that `-h`, `--help` and the command's options
+keep their meaning until the program (see [how the command line is
+read](/parsing)).
 
 ## Values
 

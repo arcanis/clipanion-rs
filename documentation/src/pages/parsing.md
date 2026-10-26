@@ -57,3 +57,36 @@ options:
   `bisect --good v1 make -j4 -- --verbose` forwards `make -j4 -- --verbose`.
 
 Right after the command's path, `-h` and `--help` are forwarded too.
+
+### Proxying a program
+
+When what a proxy forwards starts with a program, whose name never starts with a
+dash, declare it with `proxy_program` rather than `proxy`:
+
+```rust
+#[cli::command(proxy_program)]
+#[cli::path("bisect")]
+struct BisectCommand {
+    #[cli::option("--good")]
+    good: String,
+
+    command: Vec<String>,
+}
+```
+
+The proxy then starts only at a word that isn't option-like, or after `--`, and
+every option-like word before it is one of the command's options:
+
+- the options are read as usual: `bisect --good v1 --repo r make` forwards
+  `make`;
+- `-h` and `--help` give the command's help, right after its path too:
+  `bisect --help`, `bisect --good v1 -h`;
+- an unknown one is an error, not the program: `bisect --good v1 --frobnicate`;
+- after `--`, the program can start with a dash: `bisect --good v1 -- -x` forwards
+  `-x`;
+- once the program started, the proxy takes every word, as before:
+  `bisect --good v1 make --help` forwards `make --help`.
+
+A word is option-like when a positional couldn't take it: when it starts with a
+dash, except `-` alone and negative numbers (`-1`, `-0.5`) that aren't one of the
+command's options. Those start the program.

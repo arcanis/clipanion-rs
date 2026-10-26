@@ -326,6 +326,11 @@ pub enum PositionalSpec {
         is_prefix: bool,
         is_proxy: bool,
 
+        /// For a proxy: whether it only starts at a word that isn't option-like,
+        /// or after `--`. Every option-like word before it is then read as one of
+        /// the command's options, `-h` and `--help` included.
+        proxy_program: bool,
+
         #[cfg_attr(feature = "serde", serde(skip))]
         completer: Option<fn(&crate::completion::CompletionContext) -> Vec<crate::completion::Completion>>,
     },
@@ -336,9 +341,9 @@ impl PartialEq for PositionalSpec {
         match (self, other) {
             (PositionalSpec::Keyword { expected: a }, PositionalSpec::Keyword { expected: b }) => a == b,
             (
-                PositionalSpec::Dynamic { name: a_name, documentation: a_doc, min_len: a_min, extra_len: a_extra, is_prefix: a_prefix, is_proxy: a_proxy, .. },
-                PositionalSpec::Dynamic { name: b_name, documentation: b_doc, min_len: b_min, extra_len: b_extra, is_prefix: b_prefix, is_proxy: b_proxy, .. },
-            ) => a_name == b_name && a_doc == b_doc && a_min == b_min && a_extra == b_extra && a_prefix == b_prefix && a_proxy == b_proxy,
+                PositionalSpec::Dynamic { name: a_name, documentation: a_doc, min_len: a_min, extra_len: a_extra, is_prefix: a_prefix, is_proxy: a_proxy, proxy_program: a_proxy_program, .. },
+                PositionalSpec::Dynamic { name: b_name, documentation: b_doc, min_len: b_min, extra_len: b_extra, is_prefix: b_prefix, is_proxy: b_proxy, proxy_program: b_proxy_program, .. },
+            ) => a_name == b_name && a_doc == b_doc && a_min == b_min && a_extra == b_extra && a_prefix == b_prefix && a_proxy == b_proxy && a_proxy_program == b_proxy_program,
             _ => false,
         }
     }
@@ -416,6 +421,7 @@ impl PositionalSpec {
 
             is_prefix: false,
             is_proxy: false,
+            proxy_program: false,
             completer: None,
         }
     }
@@ -431,6 +437,7 @@ impl PositionalSpec {
 
             is_prefix: false,
             is_proxy: false,
+            proxy_program: false,
             completer: None,
         }
     }
@@ -446,6 +453,7 @@ impl PositionalSpec {
 
             is_prefix: false,
             is_proxy: false,
+            proxy_program: false,
             completer: None,
         }
     }
@@ -461,6 +469,24 @@ impl PositionalSpec {
 
             is_prefix: false,
             is_proxy: true,
+            proxy_program: false,
+            completer: None,
+        }
+    }
+
+    /// A proxy that only starts at a word that isn't option-like, or after `--`.
+    pub fn proxy_program() -> Self {
+        PositionalSpec::Dynamic {
+            name: Cow::Borrowed(""),
+
+            documentation: None,
+
+            min_len: 0,
+            extra_len: None,
+
+            is_prefix: false,
+            is_proxy: true,
+            proxy_program: true,
             completer: None,
         }
     }
@@ -683,6 +709,9 @@ pub struct CommandBuilderContext<'cmds> {
     /// Whether we're building a proxy, which takes every word: no options.
     proxy: bool,
 
+    /// Whether that proxy only starts at a word that isn't option-like.
+    proxy_program: bool,
+
     /// Whether `-h` and `--help` asked for help where options were last attached.
     help: bool,
 }
@@ -693,6 +722,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             machine: CliMachine::new(command_id),
             spec,
             proxy: false,
+            proxy_program: false,
             help: true,
         }
     }
@@ -716,8 +746,12 @@ impl<'cmds> CommandBuilderContext<'cmds> {
         match (self.proxy, reducer) {
             (false, _) => Some(Check::IsPositional),
 
-            // Until a proxy starts, the command's options are read as options.
-            (true, Reducer::StartPositional(_)) => Some(Check::IsProxyStart {help: self.help}),
+            // Until a proxy starts, the command's options are read as options;
+            // with `proxy_program`, any option-like word is.
+            (true, Reducer::StartPositional(_)) => match self.proxy_program {
+                true => Some(Check::IsPositional),
+                false => Some(Check::IsProxyStart {help: self.help}),
+            },
 
             (true, _) => None,
         }
@@ -829,8 +863,9 @@ impl<'cmds> CommandBuilderContext<'cmds> {
                         = self.attach_options(next_node_id, false);
                 },
 
-                PositionalSpec::Dynamic {min_len, extra_len, is_proxy, ..} => {
+                PositionalSpec::Dynamic {min_len, extra_len, is_proxy, proxy_program, ..} => {
                     self.proxy = *is_proxy;
+                    self.proxy_program = *is_proxy && *proxy_program;
 
                     current_node_id = self.attach_variadic(
                         current_node_id,
@@ -841,6 +876,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
                     );
 
                     self.proxy = false;
+                    self.proxy_program = false;
                 },
             }
         }
@@ -859,9 +895,11 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             None,
         );
 
-        let is_first_positional_a_proxy
+        // A proxy that directly follows the path takes `-h` and `--help`, unless it
+        // only starts at a word that isn't option-like.
+        let is_first_positional_a_help_proxy
             = self.spec.components.iter()
-                .find_map(|component| if let Component::Positional(PositionalSpec::Dynamic {is_prefix, is_proxy, ..}) = component {(!is_prefix).then_some(*is_proxy)} else {None})
+                .find_map(|component| if let Component::Positional(PositionalSpec::Dynamic {is_prefix, is_proxy, proxy_program, ..}) = component {(!is_prefix).then_some(*is_proxy && !*proxy_program)} else {None})
                 .unwrap_or(false);
 
         let mut current_node_id
@@ -897,7 +935,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
                         let is_last_segment
                             = i == path.len() - 1;
                         let is_followed_by_proxy
-                            = is_last_segment && is_first_positional_a_proxy;
+                            = is_last_segment && is_first_positional_a_help_proxy;
 
                         let post_segment_node_id
                             = self.machine.create_node();

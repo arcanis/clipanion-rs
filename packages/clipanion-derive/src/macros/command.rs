@@ -100,6 +100,16 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
         .map(|lit| lit.value)
         .unwrap_or(false);
 
+    // A proxy to a program, whose name never looks like an option: it only starts at a word that
+    // isn't option-like, so the command's options (and `-h`, `--help`) come first. It's a proxy.
+    let proxy_program = command_attribute_bag.take("proxy_program")
+        .map(expect_lit!(Lit::Bool))
+        .transpose()?
+        .map(|lit| lit.value)
+        .unwrap_or(false);
+
+    let is_proxy = is_proxy || proxy_program;
+
     let explicit_positionals = command_attribute_bag.take("explicit_positionals")
         .map(expect_lit!(Lit::Bool))
         .transpose()?
@@ -524,6 +534,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                         extra_len: None,
                         is_prefix: #is_prefix,
                         is_proxy: #is_proxy,
+                        proxy_program: #proxy_program,
                         completer: #completer_expr,
                     })
                 });
@@ -582,6 +593,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                         extra_len: #extra_len,
                         is_prefix: #is_prefix,
                         is_proxy: false,
+                        proxy_program: false,
                         completer: #completer_expr,
                     })
                 });

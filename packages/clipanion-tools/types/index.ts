@@ -10,7 +10,13 @@ export type Example = { command: string, description: string, };
 
 export type OptionSpec = { primaryName: string, aliases: Array<string>, documentation: Documentation | null, defaultValue: string | null, minLen: number, extraLen: number | null, allowBinding: boolean, allowBoolean: boolean, isHidden: boolean, isRequired: boolean, };
 
-export type PositionalSpec = { "positionalType": "keyword", expected: string, } | { "positionalType": "dynamic", name: string, documentation: Documentation | null, min_len: number, extra_len: number | null, is_prefix: boolean, is_proxy: boolean, };
+export type PositionalSpec = { "positionalType": "keyword", expected: string, } | { "positionalType": "dynamic", name: string, documentation: Documentation | null, min_len: number, extra_len: number | null, is_prefix: boolean, is_proxy: boolean, 
+/**
+ * For a proxy: whether it only starts at a word that isn't option-like,
+ * or after `--`. Every option-like word before it is then read as one of
+ * the command's options, `-h` and `--help` included.
+ */
+proxy_program: boolean, };
 
 export type Token = { "type": "binary", argIndex: number, slice: { start: number, end: number, }, } | { "type": "syntax", argIndex: number, slice: { start: number, end: number, }, } | { "type": "keyword", argIndex: number, slice: { start: number, end: number, }, } | { "type": "option", argIndex: number, slice: { start: number, end: number, }, componentId: number, } | { "type": "positional", argIndex: number, slice: { start: number, end: number, }, componentId: number, } | { "type": "assign", argIndex: number, slice: { start: number, end: number, }, componentId: number, } | { "type": "value", argIndex: number, slice: { start: number, end: number, }, componentId: number, };
 

@@ -13,7 +13,8 @@
 //! - an option's required values can be any other word (`-m "- Fix"`,
 //!   `--offset -5`);
 //! - its optional values and the positionals can be words that don't start
-//!   with a dash, `-` alone, or negative numbers (`-1`, `-0.5`).
+//!   with a dash, `-` alone, or negative numbers (`-1`, `-0.5`). The other words
+//!   are option-like: a `proxy_program` proxy doesn't start at one of them.
 
 use std::ops::Range;
 

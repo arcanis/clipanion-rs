@@ -63,6 +63,7 @@ fn gen_random_positional_spec<R: Rng>(rng: &mut R, use_optional_positionals: boo
             },
             is_prefix: false,
             is_proxy: false,
+            proxy_program: false,
             completer: None,
         },
 

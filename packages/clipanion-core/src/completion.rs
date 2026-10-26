@@ -216,7 +216,7 @@ pub fn compute_completions<'cmds, 'args>(
                 }
             }
 
-            for (_, transition) in &node.dynamics {
+            for (check, transition) in &node.dynamics {
                 match &transition.reducer {
                     Some(Reducer::StartPositional(_) | Reducer::PushPositional) if state.pending_values.is_none() => {
                         // Positional argument — invoke completer if available
@@ -231,6 +231,16 @@ pub fn compute_completions<'cmds, 'args>(
                                 };
 
                             if let Some(id) = component_id {
+                                // A `proxy_program` proxy doesn't start at an option-like
+                                // word: what's being typed can only be one of the options.
+                                let starts_proxy_program
+                                    = matches!(transition.reducer, Some(Reducer::StartPositional(_)))
+                                        && matches!(cmd.components.get(id), Some(Component::Positional(PositionalSpec::Dynamic {is_proxy: true, proxy_program: true, ..})));
+
+                                if starts_proxy_program && check.as_ref().is_some_and(|check| !check.check(cmd, state, context.current)) {
+                                    continue;
+                                }
+
                                 if let Some(Component::Positional(PositionalSpec::Dynamic { completer: Some(f), .. })) = cmd.components.get(id) {
                                     // Build a context local to this positional: only include
                                     // values already consumed by this specific component.
@@ -1028,6 +1038,7 @@ mod tests {
                         extra_len: Some(0),
                         is_prefix: false,
                         is_proxy: false,
+                        proxy_program: false,
                         completer: Some(branch_completer),
                     }),
                 ].into(),
@@ -1089,6 +1100,7 @@ mod tests {
                         extra_len: Some(0),
                         is_prefix: false,
                         is_proxy: false,
+                        proxy_program: false,
                         completer: None,
                     }),
                 ].into(),
@@ -1143,6 +1155,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(script_completer),
                     }),
                 ].into(),
@@ -1227,6 +1240,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(echo_context_completer),
                     }),
                 ].into(),
@@ -1317,6 +1331,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(echo_context_completer),
                     }),
                 ].into(),
@@ -1379,6 +1394,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: None,
                     }),
                 ].into(),
@@ -1432,6 +1448,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(run_completer),
                     }),
                 ].into(),
@@ -1448,6 +1465,7 @@ mod tests {
                         extra_len: Some(0),
                         is_prefix: false,
                         is_proxy: false,
+                        proxy_program: false,
                         completer: Some(branch_completer),
                     }),
                 ].into(),
@@ -1499,6 +1517,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(script_completer),
                     }),
                 ].into(),
@@ -1532,6 +1551,72 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_program_completes_options_until_it_starts() {
+        let specs = vec![
+            CommandSpec {
+                primary_path: vec!["run".into()].into(),
+                components: vec![
+                    Component::Option(OptionSpec::boolean("--verbose")),
+                    Component::Positional(PositionalSpec::Dynamic {
+                        name: "ARGS".into(),
+                        documentation: None,
+                        min_len: 1,
+                        extra_len: None,
+                        is_prefix: false,
+                        is_proxy: true,
+                        proxy_program: true,
+                        completer: Some(echo_context_completer),
+                    }),
+                ].into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut builder
+            = CliBuilder::new();
+
+        for spec in &specs {
+            builder.add_command(spec);
+        }
+
+        let machine
+            = builder.compile();
+
+        let command_refs: Vec<&CommandSpec>
+            = specs.iter().collect();
+
+        let texts = |args_before: Vec<&str>, current: &str| -> Vec<String> {
+            let context
+                = CompletionContext::new(args_before, current);
+
+            compute_completions(&command_refs, &machine, &context).completions.into_iter()
+                .map(|completion| completion.text)
+                .collect()
+        };
+
+        // `run --<TAB>`: the proxy can't start with an option-like word, only the options.
+        let completions = texts(vec!["run"], "--");
+        assert!(completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+        assert!(!completions.iter().any(|text| text.starts_with("current:")), "got: {:?}", completions);
+
+        // `run <TAB>`: the options, and the proxy's first word.
+        let completions = texts(vec!["run"], "");
+        assert!(completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+        assert!(completions.contains(&"current:".to_string()), "got: {:?}", completions);
+
+        // After `--`, the proxy can start with a dash.
+        let completions = texts(vec!["run", "--"], "-");
+        assert!(completions.contains(&"current:-".to_string()), "got: {:?}", completions);
+        assert!(!completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+
+        // Once it started, the proxy takes option-like words too.
+        let completions = texts(vec!["run", "--verbose", "test"], "--");
+        assert!(completions.contains(&"before:test".to_string()), "got: {:?}", completions);
+        assert!(completions.contains(&"current:--".to_string()), "got: {:?}", completions);
+        assert!(!completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+    }
+
+    #[test]
     fn test_proxy_swallows_option_like_args() {
         // Once proxy has consumed at least one arg, option-like args should go
         // to the proxy completer rather than being treated as CLI options.
@@ -1547,6 +1632,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(echo_context_completer),
                     }),
                 ].into(),
@@ -1659,6 +1745,7 @@ mod tests {
                         extra_len: None,
                         is_prefix: false,
                         is_proxy: true,
+                        proxy_program: false,
                         completer: Some(delegate_completer),
                     }),
                 ].into(),
@@ -1682,6 +1769,7 @@ mod tests {
                         extra_len: Some(0),
                         is_prefix: false,
                         is_proxy: false,
+                        proxy_program: false,
                         completer: Some(branch_completer),
                     }),
                 ].into(),
