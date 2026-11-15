@@ -5,44 +5,62 @@ use syn::{Attribute, DeriveInput, Expr, ExprLit, Fields, Ident, Lit, LitStr, Met
 
 use crate::{shared::expect_lit, utils::{to_lit_str, AttributeBag, CliAttributes, OptionBag}};
 
-fn parse_documentation(value: String) -> proc_macro2::TokenStream {
-    let lines
-        = value.trim()
-            .lines()
-            .collect::<Vec<_>>();
+/// Splits a doc comment into paragraphs. The lines of a paragraph are joined
+/// with single spaces, whatever their indentation; a paragraph ends at an empty
+/// line, and each item of a list (a line starting with `- ` or `* `) is a
+/// paragraph of its own.
+fn parse_paragraphs(value: &str) -> Vec<String> {
+    let mut paragraphs
+        = vec![];
 
-    let has_details
-        = lines.len() > 1;
+    let mut current
+        = String::new();
 
-    let mut lines_it
-        = lines.into_iter();
+    for line in value.lines() {
+        let line
+            = line.trim();
 
-    let description
-        = to_lit_str(lines_it.next().expect("Missing first line"));
+        let is_list_item
+            = line.starts_with("- ") || line.starts_with("* ");
 
-    let details = if has_details {
-        let mut detail_lines
-            = vec![String::new()];
-
-        for line in lines_it {
-            if line.is_empty() {
-                detail_lines.push(String::new());
-            } else {
-                let trailing_line
-                    = detail_lines.last_mut().unwrap();
-
-                trailing_line.push(' ');
-                trailing_line.push_str(line);
-            }
+        if (line.is_empty() || is_list_item) && !current.is_empty() {
+            paragraphs.push(std::mem::take(&mut current));
         }
 
-        let raw_details
-            = detail_lines.join("\n\n");
+        if !line.is_empty() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
 
-        let trimmed_details
-            = raw_details.trim();
+            current.push_str(line);
+        }
+    }
 
-        quote! {Some(::std::borrow::Cow::Borrowed(#trimmed_details))}
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+
+    paragraphs
+}
+
+/// The first paragraph of a doc comment is its description, the following
+/// ones its details.
+fn parse_documentation(value: String) -> proc_macro2::TokenStream {
+    let paragraphs
+        = parse_paragraphs(&value);
+
+    let Some((description, details)) = paragraphs.split_first() else {
+        return quote! {None};
+    };
+
+    let description
+        = to_lit_str(description);
+
+    let details = if !details.is_empty() {
+        let details
+            = details.join("\n\n");
+
+        quote! {Some(::std::borrow::Cow::Borrowed(#details))}
     } else {
         quote! {None}
     };
