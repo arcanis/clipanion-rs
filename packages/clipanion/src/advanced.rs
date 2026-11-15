@@ -2,7 +2,7 @@ use std::{collections::HashMap, future::Future};
 
 use clipanion_core::{BuiltinCommand, CliBuilder, CompletionContext, Info, SelectionResult, Shell, compute_completions, generate_completion_script, is_completion_enabled};
 
-use crate::{details::{CliEnums, CommandExecutor, CommandExecutorAsync, CommandProvider}, format::{write_color, write_fading_title_line, Formatter}};
+use crate::{details::{CliEnums, CommandExecutor, CommandExecutorAsync, CommandProvider}, format::{format_command_help, write_color, write_fading_title_line, Formatter}};
 
 /**
  * Used to define the properties of the CLI. In general you can ignore this and
@@ -152,6 +152,12 @@ fn handle_builtin<'cmds, 'args, S: CliEnums + CommandProvider>(builder: &CliBuil
         },
 
         BuiltinCommand::Help(commands) => {
+            // The help of a single command shows everything about it.
+            if let [command] = commands.as_slice() {
+                print!("{}", format_command_help(&env.info, command));
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+
             let mut output_string
                 = String::new();
 

@@ -1,6 +1,8 @@
+use std::iter::once;
+
 use colored::Colorize;
 
-use crate::{CommandSpec, Info};
+use crate::{CommandSpec, Component, Info, OptionDefinition};
 
 pub struct CommandUsageOptions {
     pub detailed: bool,
@@ -29,6 +31,34 @@ impl<'cmds> CommandUsageResult<'cmds> {
         };
 
         usage_line
+    }
+
+    /// The options that the command's help lists: all of them but the hidden
+    /// ones. Their description includes their details, if they have any.
+    pub fn options(&self) -> Vec<OptionUsage> {
+        self.command_spec.components.iter()
+            .filter_map(Component::is_option)
+            .filter(|option| !option.is_hidden)
+            .map(|option| {
+                let description = match &option.documentation {
+                    Some(documentation) => once(documentation.description())
+                        .chain(documentation.details())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+
+                    None
+                        => String::new(),
+                };
+
+                OptionUsage {
+                    preferred_name: option.primary_name().to_string(),
+                    name_set: option.all_names().map(|name| name.to_string()).collect(),
+                    definition: OptionDefinition(option).to_string(),
+                    description,
+                    required: option.is_required,
+                }
+            })
+            .collect()
     }
 }
 

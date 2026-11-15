@@ -5,44 +5,94 @@ use syn::{Attribute, DeriveInput, Expr, ExprLit, Fields, Ident, Lit, LitStr, Met
 
 use crate::{shared::expect_lit, utils::{to_lit_str, AttributeBag, CliAttributes, OptionBag}};
 
-fn parse_documentation(value: String) -> proc_macro2::TokenStream {
-    let lines
-        = value.trim()
-            .lines()
-            .collect::<Vec<_>>();
+/// Splits a doc comment into paragraphs. The lines of a paragraph are joined
+/// with single spaces, whatever their indentation; a paragraph ends at an empty
+/// line, and each item of a list (a line starting with `- ` or `* `) is a
+/// paragraph of its own.
+fn parse_paragraphs(value: &str) -> Vec<String> {
+    let mut paragraphs
+        = vec![];
 
-    let has_details
-        = lines.len() > 1;
+    let mut current
+        = String::new();
 
-    let mut lines_it
-        = lines.into_iter();
+    for line in value.lines() {
+        let line
+            = line.trim();
 
-    let description
-        = to_lit_str(lines_it.next().expect("Missing first line"));
+        let is_list_item
+            = line.starts_with("- ") || line.starts_with("* ");
 
-    let details = if has_details {
-        let mut detail_lines
-            = vec![String::new()];
-
-        for line in lines_it {
-            if line.is_empty() {
-                detail_lines.push(String::new());
-            } else {
-                let trailing_line
-                    = detail_lines.last_mut().unwrap();
-
-                trailing_line.push(' ');
-                trailing_line.push_str(line);
-            }
+        if (line.is_empty() || is_list_item) && !current.is_empty() {
+            paragraphs.push(std::mem::take(&mut current));
         }
 
-        let raw_details
-            = detail_lines.join("\n\n");
+        if !line.is_empty() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
 
-        let trimmed_details
-            = raw_details.trim();
+            current.push_str(line);
+        }
+    }
 
-        quote! {Some(::std::borrow::Cow::Borrowed(#trimmed_details))}
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+
+    paragraphs
+}
+
+/// Takes the examples out of a command's doc comment: the paragraphs after an
+/// `## Examples` heading, a description then its command, between backticks.
+fn take_examples(paragraphs: &mut Vec<String>) -> Result<Vec<(String, String)>, String> {
+    let Some(heading_index) = paragraphs.iter().position(|paragraph| paragraph == "## Examples") else {
+        return Ok(vec![]);
+    };
+
+    let example_paragraphs
+        = paragraphs.split_off(heading_index + 1);
+
+    paragraphs.pop();
+
+    let mut examples
+        = vec![];
+
+    for pair in example_paragraphs.chunks(2) {
+        let [description, command] = pair else {
+            return Err(format!("The example \"{}\" has no command (expected a paragraph like `my-program --flag`)", pair[0]));
+        };
+
+        let command = command.strip_prefix('`')
+            .and_then(|command| command.strip_suffix('`'))
+            .filter(|command| !command.is_empty() && !command.contains('`'))
+            .ok_or_else(|| format!("The command of the example \"{}\" must be a single code span, like `my-program --flag` (got: {})", description, command))?;
+
+        examples.push((description.clone(), command.to_string()));
+    }
+
+    Ok(examples)
+}
+
+/// The first paragraph of a doc comment is its description, the following
+/// ones its details.
+fn parse_documentation(value: String) -> proc_macro2::TokenStream {
+    documentation_tokens(&parse_paragraphs(&value))
+}
+
+fn documentation_tokens(paragraphs: &[String]) -> proc_macro2::TokenStream {
+    let Some((description, details)) = paragraphs.split_first() else {
+        return quote! {None};
+    };
+
+    let description
+        = to_lit_str(description);
+
+    let details = if !details.is_empty() {
+        let details
+            = details.join("\n\n");
+
+        quote! {Some(::std::borrow::Cow::Borrowed(#details))}
     } else {
         quote! {None}
     };
@@ -82,11 +132,25 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
         .take_unique::<LitStr>("category")?
         .map_or(quote!{None}, |lit| quote!{Some(::std::borrow::Cow::Borrowed(#lit))});
 
-    let command_documentation = command_cli_attributes
+    let mut command_paragraphs = command_cli_attributes
         .take_unique::<LitStr>("description")?
         .map(|lit_str| lit_str.value())
         .or_else(|| command_cli_attributes.documentation.clone())
-        .map_or(quote! {None}, parse_documentation);
+        .map_or(vec![], |value| parse_paragraphs(&value));
+
+    let command_examples
+        = take_examples(&mut command_paragraphs)
+            .map_err(|message| syn::Error::new_spanned(&input.ident, message))?;
+
+    let command_documentation
+        = documentation_tokens(&command_paragraphs);
+
+    let command_examples = command_examples.iter().map(|(description, command)| quote! {
+        clipanion::core::Example {
+            command: ::std::borrow::Cow::Borrowed(#command),
+            description: ::std::borrow::Cow::Borrowed(#description),
+        }
+    });
 
     let is_default = command_attribute_bag.take("default")
         .map(expect_lit!(Lit::Bool))
@@ -659,7 +723,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     aliases: ::std::borrow::Cow::Borrowed(&[#(#alias_paths),*]),
                     category: #command_category,
                     documentation: #command_documentation,
-                    examples: ::std::borrow::Cow::Borrowed(&[]),
+                    examples: ::std::borrow::Cow::Borrowed(&[#(#command_examples),*]),
                     components: ::std::borrow::Cow::Borrowed(&[#(#components),*]),
                     required_options: ::std::borrow::Cow::Borrowed(&[#(#required_options),*]),
                 };
