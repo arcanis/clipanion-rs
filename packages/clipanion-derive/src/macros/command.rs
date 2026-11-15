@@ -43,12 +43,44 @@ fn parse_paragraphs(value: &str) -> Vec<String> {
     paragraphs
 }
 
+/// Takes the examples out of a command's doc comment: the paragraphs after an
+/// `## Examples` heading, a description then its command, between backticks.
+fn take_examples(paragraphs: &mut Vec<String>) -> Result<Vec<(String, String)>, String> {
+    let Some(heading_index) = paragraphs.iter().position(|paragraph| paragraph == "## Examples") else {
+        return Ok(vec![]);
+    };
+
+    let example_paragraphs
+        = paragraphs.split_off(heading_index + 1);
+
+    paragraphs.pop();
+
+    let mut examples
+        = vec![];
+
+    for pair in example_paragraphs.chunks(2) {
+        let [description, command] = pair else {
+            return Err(format!("The example \"{}\" has no command (expected a paragraph like `my-program --flag`)", pair[0]));
+        };
+
+        let command = command.strip_prefix('`')
+            .and_then(|command| command.strip_suffix('`'))
+            .filter(|command| !command.is_empty() && !command.contains('`'))
+            .ok_or_else(|| format!("The command of the example \"{}\" must be a single code span, like `my-program --flag` (got: {})", description, command))?;
+
+        examples.push((description.clone(), command.to_string()));
+    }
+
+    Ok(examples)
+}
+
 /// The first paragraph of a doc comment is its description, the following
 /// ones its details.
 fn parse_documentation(value: String) -> proc_macro2::TokenStream {
-    let paragraphs
-        = parse_paragraphs(&value);
+    documentation_tokens(&parse_paragraphs(&value))
+}
 
+fn documentation_tokens(paragraphs: &[String]) -> proc_macro2::TokenStream {
     let Some((description, details)) = paragraphs.split_first() else {
         return quote! {None};
     };
@@ -100,11 +132,25 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
         .take_unique::<LitStr>("category")?
         .map_or(quote!{None}, |lit| quote!{Some(::std::borrow::Cow::Borrowed(#lit))});
 
-    let command_documentation = command_cli_attributes
+    let mut command_paragraphs = command_cli_attributes
         .take_unique::<LitStr>("description")?
         .map(|lit_str| lit_str.value())
         .or_else(|| command_cli_attributes.documentation.clone())
-        .map_or(quote! {None}, parse_documentation);
+        .map_or(vec![], |value| parse_paragraphs(&value));
+
+    let command_examples
+        = take_examples(&mut command_paragraphs)
+            .map_err(|message| syn::Error::new_spanned(&input.ident, message))?;
+
+    let command_documentation
+        = documentation_tokens(&command_paragraphs);
+
+    let command_examples = command_examples.iter().map(|(description, command)| quote! {
+        clipanion::core::Example {
+            command: ::std::borrow::Cow::Borrowed(#command),
+            description: ::std::borrow::Cow::Borrowed(#description),
+        }
+    });
 
     let is_default = command_attribute_bag.take("default")
         .map(expect_lit!(Lit::Bool))
@@ -677,7 +723,7 @@ pub fn command_macro(args: TokenStream, mut input: DeriveInput) -> Result<TokenS
                     aliases: ::std::borrow::Cow::Borrowed(&[#(#alias_paths),*]),
                     category: #command_category,
                     documentation: #command_documentation,
-                    examples: ::std::borrow::Cow::Borrowed(&[]),
+                    examples: ::std::borrow::Cow::Borrowed(&[#(#command_examples),*]),
                     components: ::std::borrow::Cow::Borrowed(&[#(#components),*]),
                     required_options: ::std::borrow::Cow::Borrowed(&[#(#required_options),*]),
                 };
