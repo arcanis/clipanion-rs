@@ -64,6 +64,41 @@ program: it only starts at a word that isn't option-like, so that `-h`, `--help`
 keep their meaning until the program (see [how the command line is
 read](/parsing)).
 
+## Documentation
+
+Doc comments document commands, options and positionals. Their first paragraph,
+up to the first empty line, is the description; the following ones are the
+details. The lines of a paragraph are joined, and each list item is a paragraph
+of its own. A command's doc comment can end with its examples: an `## Examples`
+heading, then the description of each example and its command, a single code
+span:
+
+```rust
+/// Add dependencies to the project
+///
+/// The packages are added to the `dependencies`, unless `--dev` is set.
+///
+/// ## Examples
+///
+/// Add a regular package
+///
+/// `my-tool add lodash`
+#[cli::command]
+#[cli::path("add")]
+struct AddCommand {
+    /// Add the packages to the `devDependencies` rather than to the
+    /// `dependencies`
+    #[cli::option("--dev", default = false)]
+    dev: bool,
+
+    packages: Vec<String>,
+}
+```
+
+`my-tool add --help` prints them all: the description, the usage, the options
+with their descriptions, the details, and the examples. `my-tool --help` lists
+the commands with their descriptions.
+
 ## Values
 
 Option and positional values are read with `FromStr`: `String`, numbers,

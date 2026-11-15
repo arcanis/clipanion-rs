@@ -582,27 +582,30 @@ impl OptionSpec {
     }
 }
 
+/// An option's names and the values it takes: `--message,-m <arg>`.
+pub struct OptionDefinition<'a>(pub &'a OptionSpec);
+
+impl std::fmt::Display for OptionDefinition<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let OptionDefinition(spec) = self;
+
+        format_collection(f, spec.all_names(), ",")?;
+
+        if spec.min_len > 0 || spec.extra_len != Some(0) {
+            write!(f, " ")?;
+            format_range(f, "arg", spec.min_len, spec.extra_len)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for OptionSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_required {
-            write!(f, "<{}", self.primary_name)?;
+            write!(f, "<{}>", OptionDefinition(self))
         } else {
-            write!(f, "[{}", self.primary_name)?;
-        }
-
-        for alias in self.aliases.iter() {
-            write!(f, ",{}", alias)?;
-        }
-
-        if self.min_len > 0 || self.extra_len != Some(0) {
-            write!(f, " ")?;
-            format_range(f, "arg", self.min_len, self.extra_len)?;
-        }
-
-        if self.is_required {
-            write!(f, ">")
-        } else {
-            write!(f, "]")
+            write!(f, "[{}]", OptionDefinition(self))
         }
     }
 }
