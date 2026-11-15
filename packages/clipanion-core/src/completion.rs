@@ -1617,6 +1617,61 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_starts_after_the_positionals_before_it() {
+        let specs = vec![
+            CommandSpec {
+                primary_path: vec!["run".into()].into(),
+                components: vec![
+                    Component::Option(OptionSpec::boolean("--verbose")),
+                    Component::Positional(PositionalSpec::required()),
+                    Component::Positional(PositionalSpec::Dynamic {
+                        name: "ARGS".into(),
+                        documentation: None,
+                        min_len: 0,
+                        extra_len: None,
+                        is_prefix: false,
+                        is_proxy: true,
+                        proxy_program: false,
+                        completer: Some(echo_context_completer),
+                    }),
+                ].into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut builder
+            = CliBuilder::new();
+
+        for spec in &specs {
+            builder.add_command(spec);
+        }
+
+        let machine
+            = builder.compile();
+
+        let command_refs: Vec<&CommandSpec>
+            = specs.iter().collect();
+
+        let texts = |args_before: Vec<&str>, current: &str| -> Vec<String> {
+            let context
+                = CompletionContext::new(args_before, current);
+
+            compute_completions(&command_refs, &machine, &context).completions.into_iter()
+                .map(|completion| completion.text)
+                .collect()
+        };
+
+        // `run --<TAB>`: the positional isn't read yet, the options can be given.
+        let completions = texts(vec!["run"], "--");
+        assert!(completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+
+        // `run build --<TAB>`: the positional started the proxy, which takes the word.
+        let completions = texts(vec!["run", "build"], "--");
+        assert!(completions.contains(&"current:--".to_string()), "got: {:?}", completions);
+        assert!(!completions.contains(&"--verbose".to_string()), "got: {:?}", completions);
+    }
+
+    #[test]
     fn test_proxy_swallows_option_like_args() {
         // Once proxy has consumed at least one arg, option-like args should go
         // to the proxy completer rather than being treated as CLI options.

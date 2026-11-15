@@ -232,8 +232,10 @@ pub enum Check {
     IsPositional,
 
     /// The first word of a proxy: any word that isn't one of the command's
-    /// options (`-h` and `--help` are, with `help`); after `--`, any word.
-    IsProxyStart {help: bool},
+    /// options (`-h` and `--help` are, with `help`), or with `program` only a
+    /// positional's value; after `--`, or once the positional `after` was read,
+    /// any word.
+    IsProxyStart {help: bool, program: bool, after: Option<usize>},
 }
 
 impl Check {
@@ -243,8 +245,15 @@ impl Check {
                 state.post_double_dash || options::is_value_word(spec, arg)
             },
 
-            Check::IsProxyStart {help} => {
-                state.post_double_dash || !options::is_option_word(spec, arg, *help)
+            Check::IsProxyStart {help, program, after} => {
+                if state.post_double_dash || after.is_some_and(|after| state.positional_values.iter().any(|(id, _)| *id == after)) {
+                    return true;
+                }
+
+                match program {
+                    true => options::is_value_word(spec, arg),
+                    false => !options::is_option_word(spec, arg, *help),
+                }
             },
         }
     }
@@ -715,6 +724,13 @@ pub struct CommandBuilderContext<'cmds> {
     /// Whether that proxy only starts at a word that isn't option-like.
     proxy_program: bool,
 
+    /// Whether we're building the last positional before a proxy: once it's
+    /// read, the proxy started, so no options after it either.
+    starts_proxy: bool,
+
+    /// The positional that starts the proxy we're building, if one precedes it.
+    proxy_after: Option<usize>,
+
     /// Whether `-h` and `--help` asked for help where options were last attached.
     help: bool,
 }
@@ -726,6 +742,8 @@ impl<'cmds> CommandBuilderContext<'cmds> {
             spec,
             proxy: false,
             proxy_program: false,
+            starts_proxy: false,
+            proxy_after: None,
             help: true,
         }
     }
@@ -733,7 +751,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
     /// Lets the command's options be given on `node_id`: the runner reads them
     /// there, from the command's spec, and stays on the node.
     fn attach_options(&mut self, node_id: usize, is_followed_by_proxy: bool) -> usize {
-        if !self.proxy {
+        if !self.proxy && !self.starts_proxy {
             // A proxy that directly follows the command's path takes `-h` and `--help`.
             self.help = !is_followed_by_proxy;
 
@@ -751,10 +769,11 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
             // Until a proxy starts, the command's options are read as options;
             // with `proxy_program`, any option-like word is.
-            (true, Reducer::StartPositional(_)) => match self.proxy_program {
-                true => Some(Check::IsPositional),
-                false => Some(Check::IsProxyStart {help: self.help}),
-            },
+            (true, Reducer::StartPositional(_)) => Some(Check::IsProxyStart {
+                help: self.help,
+                program: self.proxy_program,
+                after: self.proxy_after,
+            }),
 
             (true, _) => None,
         }
@@ -849,7 +868,7 @@ impl<'cmds> CommandBuilderContext<'cmds> {
         let mut current_node_id
             = pre_node_id;
 
-        for (id, spec) in positionals {
+        for (index, (id, spec)) in positionals.iter().enumerate() {
             match spec {
                 PositionalSpec::Keyword {expected} => {
                     let next_node_id
@@ -867,8 +886,14 @@ impl<'cmds> CommandBuilderContext<'cmds> {
                 },
 
                 PositionalSpec::Dynamic {min_len, extra_len, is_proxy, proxy_program, ..} => {
+                    // The positionals before a proxy are what starts it: once the
+                    // last one is read, every word is forwarded.
+                    let starts_proxy = !is_proxy
+                        && matches!(positionals.get(index + 1), Some((_, PositionalSpec::Dynamic {is_proxy: true, ..})));
+
                     self.proxy = *is_proxy;
                     self.proxy_program = *is_proxy && *proxy_program;
+                    self.starts_proxy = starts_proxy;
 
                     current_node_id = self.attach_variadic(
                         current_node_id,
@@ -880,6 +905,8 @@ impl<'cmds> CommandBuilderContext<'cmds> {
 
                     self.proxy = false;
                     self.proxy_program = false;
+                    self.starts_proxy = false;
+                    self.proxy_after = starts_proxy.then_some(*id);
                 },
             }
         }
