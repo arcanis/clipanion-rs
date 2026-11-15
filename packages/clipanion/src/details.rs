@@ -132,3 +132,22 @@ pub trait CommandExecutor {
 pub trait CommandExecutorAsync {
     fn execute(self, env: &Environment) -> impl Future<Output = crate::details::CommandResult>;
 }
+
+/**
+ * Used by the `cli::program(async)` macro to run each command. It builds the
+ * command future in a frame of its own and moves it to the heap, so the
+ * future dispatching to the commands only holds a pointer to it.
+ *
+ * Awaiting the command futures directly would make the dispatch future as
+ * large as the largest of them, and in debug builds the frame polling it
+ * would reserve a slot for each of them, which can be enough to overflow
+ * the stack of the main thread.
+ *
+ * The future isn't turned into a `dyn Future`, so it's `Send` exactly when
+ * the command's future is.
+ */
+#[doc(hidden)]
+#[inline(never)]
+pub fn box_command_future<F, Fut>(f: F) -> std::pin::Pin<Box<Fut>> where F: FnOnce() -> Fut, Fut: Future<Output = CommandResult> {
+    Box::pin(f())
+}

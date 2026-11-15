@@ -19,8 +19,14 @@ pub fn cli_exec_async_macro(_args: TokenStream, mut input: DeriveInput) -> Resul
         let variant_ident
             = &variant.ident;
 
+        // Each command future is built by a function of its own and moved
+        // to the heap, see `box_command_future`.
         match_arms.push(quote! {
-            Self::#variant_ident(command) => command.execute().await.into(),
+            Self::#variant_ident(command) => {
+                ::clipanion::details::box_command_future(move || async move {
+                    command.execute().await.into()
+                }).await
+            },
         });
     }
 
