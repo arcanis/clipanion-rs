@@ -58,6 +58,13 @@ options:
 
 Right after the command's path, `-h` and `--help` are forwarded too.
 
+When positionals come before the proxy, they're what starts it: the options are
+read until the last of them, and once it's read the proxy takes every word, the
+command's options, `-h`, `--help` and `--` included. `run -p build --watch -p`
+reads the first `-p` and forwards `--watch -p`; `run build -- --watch` forwards
+`-- --watch`. An optional positional starts it when it's given. The same goes
+for `proxy_program`, below.
+
 ### Proxying a program
 
 When what a proxy forwards starts with a program, whose name never starts with a
